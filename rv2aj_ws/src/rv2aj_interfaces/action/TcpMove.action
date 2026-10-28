@@ -1,0 +1,12 @@
+# Relative straight TCP move. axis: X, Y, Z (base frame), R (horizontally
+# out along the arm's reach; negative = back toward the base), or V: move by
+# vector_mm (base frame, planner only).
+string axis
+float64 distance_mm
+float64[3] vector_mm
+---
+bool success
+string message
+float64[3] final_xyz_mm
+---
+float64[3] current_xyz_mm

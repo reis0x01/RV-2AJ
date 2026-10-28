@@ -1,0 +1,12 @@
+# One trajectory "controller": rv2aj_control's planner node. It re-validates
+# the trajectory, reduces it to the fewest collision-free waypoints and runs
+# them through the driver (EXECMOV over RS-232C).
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+moveit_simple_controller_manager:
+  controller_names:
+    - rv2aj_arm_controller
+  rv2aj_arm_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints: [j1, j2, j3, j5, j6]

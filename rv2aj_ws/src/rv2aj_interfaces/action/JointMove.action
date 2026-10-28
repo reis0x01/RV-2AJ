@@ -1,0 +1,12 @@
+# relative: move `joint` (J1..J6) by offset_deg.
+# absolute: move every fitted joint to target_deg (J4 ignored).
+bool relative
+string joint
+float64 offset_deg
+float64[6] target_deg
+---
+bool success
+string message
+float64[6] final_deg
+---
+float64[6] current_deg

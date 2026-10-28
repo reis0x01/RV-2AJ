@@ -1,0 +1,57 @@
+# Parameters for the RV-2AJ stack (all nodes run in the /rv2aj namespace).
+/rv2aj/driver:
+  ros__parameters:
+    port: /dev/ttyUSB0
+    auto_connect: true            # connecting only starts the read-only poll
+    default_override_percent: 10  # applied on every connect; never remembered higher
+    max_tcp_move_mm: 50.0
+    max_joint_step_deg: 45.0
+    joint_poll_interval_s: 0.03   # JPOSF every cycle (~0.1 s per query at 9600 baud)
+    poll_interval_s: 1.0          # STATE + PPOSF when idle
+    moving_poll_interval_s: 0.5   # STATE + PPOSF while moving
+    frame_id: rv2aj_base
+
+/rv2aj/voice:
+  ros__parameters:
+    device_index: -1              # -1 = default microphone; indices are logged at startup
+    language: en-US
+    start_enabled: false
+    phrase_time_limit_s: 4.0
+    calibration_s: 1.5
+
+/rv2aj/planner:
+  ros__parameters:
+    check_step_deg: 1.0           # MoveIt checks the joint path at least every 1 deg
+    line_step_mm: 5.0             # IK sample spacing along straight TCP moves
+    line_tolerance_mm: 1.0        # max deviation from the straight line between waypoints
+    max_tcp_move_mm: 50.0
+    max_joint_step_deg: 45.0
+    planning_time_s: 5.0
+
+/rv2aj/translator:
+  ros__parameters:
+    require_keyword: true         # phrases must contain "move"/"go"
+    default_distance_mm: 5.0
+    max_distance_mm: 50.0
+
+/rv2aj/sequencer:
+  ros__parameters:
+    points_file: ~/.ros/rv2aj_points.json
+    # Home pose J1..J6 in degrees (J4 not fitted). Read from the robot 2026-10-21 (operator's
+    # new home near the stations/parts; TCP sensor IN1 watches for a part from this pose).
+    home_joints_deg: [-217.26, -97.21, 219.75, 0.00, -164.49, -350.46]
+    home_speed_percent: 40       # speed of a move to Home (Home has no taught speed of its own)
+    auto_input_bit: 1            # auto-run TCP part sensor input (IN1); triggers only when parked at home
+    auto_trigger: plc            # what starts an auto pass: plc = conveyor PLC PartReady (plc_bridge) | input = auto_input_bit
+    auto_start_point: P2E        # arm parks here (= home, sensor reads); auto pass starts at the NEXT point, runs to the end, returns home
+    gripper_wait_s: 0.6           # pause after a point's gripper command
+
+/rv2aj/plc_bridge:
+  ros__parameters:
+    plc_ip: ""                    # S7-1200 IP on the TP-Link network (e.g. 192.168.0.20); "" = bridge off
+    plc_port: 102                 # S7 protocol port (a fake PLC for testing can use another)
+    rack: 0
+    slot: 1                       # S7-1200: rack 0, slot 1
+    db_number: 10                 # DB "PC_Link" (plc/LineControl.scl), optimized access OFF, PUT/GET on
+    poll_s: 0.1
+    reconnect_s: 2.0

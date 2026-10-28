@@ -1,0 +1,252 @@
+// LineControl.scl - Festo MPS 500 conveyor, 3 stopper stations + RV-2AJ robot link.
+// S7-1200 (CPU 1214C). One function block; call it once in OB1 ("LineControl_DB").
+//
+// Generating blocks from this source creates DB "PC_Link" and FB "LineControl".
+// After generating: DB "PC_Link" properties -> General -> number Manual 10.
+// Needs, already set up in TIA Portal:
+//   - clock memory byte MB0 enabled ("Clock_1Hz" = %M0.5)
+//   - the PLC tags S1_/S2_/S3_..., PC_BeatChanged, PC_Lost, PC_Alive, RobotPicked
+//
+// Cars run 1 -> 2 -> 3 -> 1. Piston up = car held; valve output ON = piston down = car passes.
+//   Station 1 (robot): holds a car with parts and asks the laptop for a robot pass (one pass
+//                      takes all 4 parts). Parts left after a pass -> one more pass; still
+//                      not empty -> release anyway and set MissedPart. Never releases while
+//                      the robot is busy.
+//   Station 2:         empty cars wait here to be filled by hand. A car with parts leaves
+//                      only on demand (station 3 asked for a car).
+//   Station 3:         full cars wait here. Passes empty cars; passes one car when
+//                      station 1 has released its car (or has had no car for 10 s).
+// After a release the piston comes up 1 s after the car sensor stops seeing the car.
+//
+// Maintenance and line stop (operator panel, "Maintenance & safety" tab, through the laptop):
+//   MaintMode:   automatic decisions paused (no PartReady, no automatic releases); a rising
+//                edge on St<n>_Release lowers that piston for one car (station 1 not while the
+//                robot is busy). Drops by itself when the laptop link is lost (and then the
+//                line stops, see below).
+//   LineStop:    latched stop: every piston up (all cars held), nothing released, no PartReady.
+//                Cleared only by a LineReset pulse from the panel (LineStop = 0, laptop alive),
+//                so a laptop restart does not clear it. Also latched when the laptop link is
+//                lost during maintenance. NOT a safety function: the hardware E-stop is.
+
+// Laptop link, read/written by the PC with python-snap7 (needs PUT/GET enabled).
+// The PLC writes bytes 0..3 and 6..7, the PC writes bytes 4..5 (snap7 writes whole bytes).
+// The spare Bools keep each group in its own byte: do not remove them.
+DATA_BLOCK "PC_Link"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.3
+NON_RETAIN
+   STRUCT
+      PartReady : Bool;      // DBX0.0  PLC -> PC  a car with parts is waiting at station 1
+      PLC_Heartbeat : Bool;  // DBX0.1  PLC -> PC  toggles at 1 Hz
+      MissedPart : Bool;     // DBX0.2  PLC -> PC  last car left station 1 with parts still on it
+      PassCount : Int;       // DBW2    PLC -> PC  robot passes done on the current car
+      PC_Busy : Bool;        // DBX4.0  PC -> PLC  robot pass running
+      PC_Done : Bool;        // DBX4.1  PC -> PLC  2 s pulse: a pass finished OK
+      PC_Error : Bool;       // DBX4.2  PC -> PLC  last pass failed / stopped
+      PC_Armed : Bool;       // DBX4.3  PC -> PLC  operator armed auto-run on the panel
+      PC_Heartbeat : Bool;   // DBX4.4  PC -> PLC  toggled by the PC about once a second
+      Spare4_5 : Bool;
+      Spare4_6 : Bool;
+      Spare4_7 : Bool;
+      MaintMode : Bool;      // DBX5.0  PC -> PLC  maintenance: automatic decisions paused
+      St1_Release : Bool;    // DBX5.1  PC -> PLC  pulse: lower piston 1 for one car (maintenance)
+      St2_Release : Bool;    // DBX5.2  PC -> PLC  pulse: same, station 2
+      St3_Release : Bool;    // DBX5.3  PC -> PLC  pulse: same, station 3
+      LineStop : Bool;       // DBX5.4  PC -> PLC  stop the line (latched in the PLC)
+      LineReset : Bool;      // DBX5.5  PC -> PLC  pulse: clear the latched line stop
+      Spare5_6 : Bool;
+      Spare5_7 : Bool;
+      St1_Car : Bool;        // DBX6.0  PLC -> PC  station 1 car sensor (raw)
+      St1_Part : Bool;       // DBX6.1  PLC -> PC  station 1 parts on the car
+      St2_Car : Bool;        // DBX6.2
+      St2_Part : Bool;       // DBX6.3
+      St3_Car : Bool;        // DBX6.4
+      St3_Part : Bool;       // DBX6.5
+      Spare6_6 : Bool;
+      Spare6_7 : Bool;
+      St1_Valve : Bool;      // DBX7.0  PLC -> PC  piston 1 down (car passing)
+      St2_Valve : Bool;      // DBX7.1
+      St3_Valve : Bool;      // DBX7.2
+      MaintActive : Bool;    // DBX7.3  PLC -> PC  maintenance mode in effect
+      LineStopped : Bool;    // DBX7.4  PLC -> PC  line stop latched
+   END_STRUCT;
+BEGIN
+END_DATA_BLOCK
+
+FUNCTION_BLOCK "LineControl"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.3
+   VAR
+      tS1Car : TON_TIME;     // car stopped at the station for 300 ms
+      tS2Car : TON_TIME;
+      tS3Car : TON_TIME;
+      tS1Up : TON_TIME;      // piston back up 1 s after the car has gone
+      tS2Up : TON_TIME;
+      tS3Up : TON_TIME;
+      tWatchdog : TON_TIME;  // laptop heartbeat timeout
+      tS1Settle : TON_TIME;  // robot idle for 1 s: station 1 decides only then
+      tS1NoCar : TON_TIME;   // station 1 without a car for 10 s -> ask station 3
+      tS3NoCar : TON_TIME;   // station 3 without a car for 10 s -> ask station 2
+      tS2Filled : TON_TIME;  // parts seen steadily for 3 s at station 2
+      ctS1 : CTU_INT;        // robot passes on the car at station 1
+      rtDone : R_TRIG;
+      rtS1Rel : R_TRIG;
+      rtS2Rel : R_TRIG;
+      rtS3Rel : R_TRIG;
+      rtRel1 : R_TRIG;       // manual releases (maintenance)
+      rtRel2 : R_TRIG;
+      rtRel3 : R_TRIG;
+      rtLineReset : R_TRIG;
+      lastPcBeat : Bool;
+      s1Settled : Bool;
+      s1PassesDone : Bool;   // 2 passes done on this car
+      lineStopped : Bool;    // latched line stop
+      maint : Bool;          // maintenance mode in effect
+      autoLogic : Bool;      // automatic station logic allowed
+   END_VAR
+
+BEGIN
+   // ---- Car and part detection -------------------------------------------
+   #tS1Car(IN := "S1_Car", PT := T#300ms);
+   "S1_CarHere" := #tS1Car.Q;
+   #tS2Car(IN := "S2_Car", PT := T#300ms);
+   "S2_CarHere" := #tS2Car.Q;
+   #tS3Car(IN := "S3_Car", PT := T#300ms);
+   "S3_CarHere" := #tS3Car.Q;
+
+   // NC part sensors: input 0 = part present. If a station reads backwards,
+   // remove the NOT on its line.
+   "S1_PartOn" := NOT "S1_PartNC";
+   "S2_PartOn" := NOT "S2_PartNC";
+   "S3_PartOn" := NOT "S3_PartNC";
+
+   // ---- Laptop link ----------------------------------------------------------
+   "PC_Link".PLC_Heartbeat := "Clock_1Hz";
+
+   "PC_BeatChanged" := "PC_Link".PC_Heartbeat XOR #lastPcBeat;
+   #lastPcBeat := "PC_Link".PC_Heartbeat;
+   #tWatchdog(IN := NOT "PC_BeatChanged", PT := T#3s);
+   "PC_Lost" := #tWatchdog.Q;
+   "PC_Alive" := NOT "PC_Lost";
+
+   #rtDone(CLK := "PC_Link".PC_Done);
+   "RobotPicked" := #rtDone.Q;
+
+   // ---- Line stop and maintenance (panel) -----------------------------------
+   #rtLineReset(CLK := "PC_Link".LineReset);
+   IF "PC_Link".LineStop OR ("PC_Link".MaintMode AND "PC_Lost") THEN
+      #lineStopped := TRUE;
+   ELSIF #rtLineReset.Q AND "PC_Alive" THEN
+      #lineStopped := FALSE;
+   END_IF;
+   #maint := "PC_Link".MaintMode AND "PC_Alive" AND NOT #lineStopped;
+   #autoLogic := NOT #maint AND NOT #lineStopped;
+
+   // Manual releases: one car each, through the normal piston-up timers below.
+   #rtRel1(CLK := "PC_Link".St1_Release);
+   #rtRel2(CLK := "PC_Link".St2_Release);
+   #rtRel3(CLK := "PC_Link".St3_Release);
+   IF #maint AND #rtRel1.Q AND NOT "PC_Link".PC_Busy THEN
+      "S1_Valve" := TRUE;
+   END_IF;
+   IF #maint AND #rtRel2.Q THEN
+      "S2_Valve" := TRUE;
+   END_IF;
+   IF #maint AND #rtRel3.Q THEN
+      "S3_Valve" := TRUE;
+   END_IF;
+
+   // ---- Station 1 (robot) ----------------------------------------------------
+   #ctS1(CU := "RobotPicked", R := "S1_Valve", PV := 2, Q => #s1PassesDone, CV => "S1_Count");
+   "PC_Link".PassCount := "S1_Count";
+   #tS1Settle(IN := NOT "PC_Link".PC_Busy, PT := T#1s);
+   #s1Settled := #tS1Settle.Q;
+
+   // Ask the robot for a pass (the first, or one more if parts are left).
+   IF #autoLogic AND "S1_CarHere" AND "S1_PartOn" AND NOT #s1PassesDone AND #s1Settled AND NOT "S1_Valve"
+      AND "PC_Link".PC_Armed AND NOT "PC_Link".PC_Error AND "PC_Alive" THEN
+      "PC_Link".PartReady := TRUE;
+   END_IF;
+   IF "PC_Link".PC_Busy OR "S1_Valve" OR NOT "S1_CarHere" OR NOT "S1_PartOn"
+      OR NOT "PC_Link".PC_Armed OR NOT "PC_Alive" OR NOT #autoLogic THEN
+      "PC_Link".PartReady := FALSE;
+   END_IF;
+
+   // Release the car once it is empty, or after 2 passes with parts still on it (warning).
+   IF #autoLogic AND "S1_CarHere" AND #s1Settled AND (NOT "S1_PartOn" OR #s1PassesDone) THEN
+      IF "S1_PartOn" THEN
+         "PC_Link".MissedPart := TRUE;
+      ELSIF "S1_Count" > 0 THEN
+         "PC_Link".MissedPart := FALSE;     // the robot emptied this car properly
+      END_IF;
+      "S1_Valve" := TRUE;
+   END_IF;
+   #rtS1Rel(CLK := "S1_Valve");
+   IF #rtS1Rel.Q THEN
+      "S3_Req" := TRUE;
+   END_IF;
+   #tS1Up(IN := "S1_Valve" AND NOT "S1_Car", PT := T#1s);
+   IF #tS1Up.Q THEN
+      "S1_Valve" := FALSE;
+   END_IF;
+   // No car at station 1 for 10 s (start-up, or a car went missing): ask station 3.
+   // 10 s must be longer than a car needs from station 3 to station 1.
+   #tS1NoCar(IN := NOT "S1_Car" AND NOT "S3_Valve", PT := T#10s);
+   IF #tS1NoCar.Q THEN
+      "S3_Req" := TRUE;
+   END_IF;
+
+   // ---- Station 3 (full cars) ------------------------------------------------
+   IF #autoLogic AND "S3_CarHere" AND (NOT "S3_PartOn" OR "S3_Req") THEN
+      "S3_Valve" := TRUE;
+   END_IF;
+   #rtS3Rel(CLK := "S3_Valve");
+   IF #rtS3Rel.Q THEN
+      "S3_Req" := FALSE;
+      "S2_Req" := TRUE;
+   END_IF;
+   #tS3Up(IN := "S3_Valve" AND NOT "S3_Car", PT := T#1s);
+   IF #tS3Up.Q THEN
+      "S3_Valve" := FALSE;
+   END_IF;
+   #tS3NoCar(IN := NOT "S3_Car" AND NOT "S2_Valve", PT := T#10s);
+   IF #tS3NoCar.Q THEN
+      "S2_Req" := TRUE;
+   END_IF;
+
+   // ---- Station 2 (empty cars, filled by hand) -------------------------------
+   // A car leaves only on demand, and only after parts have been seen for 3 s
+   // (so it does not leave the moment the first part is put on).
+   #tS2Filled(IN := "S2_CarHere" AND "S2_PartOn", PT := T#3s);
+   IF #autoLogic AND #tS2Filled.Q AND "S2_Req" THEN
+      "S2_Valve" := TRUE;
+   END_IF;
+   #rtS2Rel(CLK := "S2_Valve");
+   IF #rtS2Rel.Q THEN
+      "S2_Req" := FALSE;
+   END_IF;
+   #tS2Up(IN := "S2_Valve" AND NOT "S2_Car", PT := T#1s);
+   IF #tS2Up.Q THEN
+      "S2_Valve" := FALSE;
+   END_IF;
+
+   // ---- Line stop: every piston up, all cars held ----------------------------
+   IF #lineStopped THEN
+      "S1_Valve" := FALSE;
+      "S2_Valve" := FALSE;
+      "S3_Valve" := FALSE;
+   END_IF;
+
+   // ---- Status for the panel -------------------------------------------------
+   "PC_Link".St1_Car := "S1_Car";
+   "PC_Link".St1_Part := "S1_PartOn";
+   "PC_Link".St2_Car := "S2_Car";
+   "PC_Link".St2_Part := "S2_PartOn";
+   "PC_Link".St3_Car := "S3_Car";
+   "PC_Link".St3_Part := "S3_PartOn";
+   "PC_Link".St1_Valve := "S1_Valve";
+   "PC_Link".St2_Valve := "S2_Valve";
+   "PC_Link".St3_Valve := "S3_Valve";
+   "PC_Link".MaintActive := #maint;
+   "PC_Link".LineStopped := #lineStopped;
+END_FUNCTION_BLOCK

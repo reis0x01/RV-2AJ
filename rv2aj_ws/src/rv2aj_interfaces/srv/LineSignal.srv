@@ -1,0 +1,11 @@
+# Set a transfer-line signal the robot asserts to Station 4.
+#   signal "ready" (OUT7) / "busy" (OUT6): value 0 or 1
+#   signal "error_code" (OUT5 bit 1, OUT4 bit 0): value 0-3
+#   signal "out<n>": any single output n = 0-15 or 900-907 (hand), value 0 or 1
+#   signal "sim_order" (simulation only): value 0-3 = order bits IN7,IN6
+string signal
+int32 value
+---
+bool success
+string message
+int32 line_outputs

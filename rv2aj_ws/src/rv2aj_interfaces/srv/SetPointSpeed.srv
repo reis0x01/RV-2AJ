@@ -1,0 +1,8 @@
+# Set a saved point's own speed override (1-100%), used for every move that
+# starts or ends at this point (the slower of the two points' speeds wins).
+string name
+int32 percent
+---
+bool success
+string message
+int32 percent

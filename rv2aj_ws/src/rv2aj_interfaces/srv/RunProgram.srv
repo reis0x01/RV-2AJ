@@ -1,0 +1,4 @@
+int32 program
+---
+bool success
+string message

@@ -1,0 +1,155 @@
+<?xml version="1.0"?>
+<!--
+  Mitsubishi RV-2AJ (5 axes: J1 J2 J3 J5 J6, there is no J4).
+
+  Kinematics: RV-1A/RV-2AJ Standard Specifications Manual BFP-A8050, Fig. 2-5.
+    J2 axis 300 mm above the mounting face, upper arm 250 mm, forearm 160 mm,
+    J5 axis to flange face 72 mm, no lateral offsets.
+  Joint directions, zero pose and base frame match the controller (checked
+  against JPOSF/PPOSF pairs from the real robot to < 0.05 mm):
+    base_link = mounting face, X forward at J1 = 0, Z up.
+    All joints zero = arm straight up; J2/J3/J5 positive tilt forward.
+    tool0 = flange face centre, Z out of the flange (controller's P point).
+  Meshes: Apache-2.0 community model, see meshes/NOTICE. They are true scale:
+  fitted joint-hub centres give J2->J3 252 mm, J3->J5 162 mm, J5->flange 72 mm,
+  and each part's joint axis is its local Y, so no scaling or rotation is used.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="rv2aj">
+  <xacro:arg name="with_tool_mesh" default="false"/>
+  <!-- Joint limits: config/joint_limits.yaml (shared with the rv2aj planner). -->
+  <xacro:property name="lim" value="${xacro.load_yaml('$(find rv2aj_description)/config/joint_limits.yaml')}"/>
+  <!-- zero_offsets_deg: joint reading when the joint is physically at the model's zero
+       (arm straight up). Joint origins are turned by -offset so the model matches the
+       real arm while joint values stay the controller's readings. -->
+  <xacro:property name="zoff" value="${lim.get('zero_offsets_deg') or dict()}"/>
+
+  <xacro:property name="deg" value="${pi / 180.0}"/>
+  <xacro:property name="mesh_dir" value="package://rv2aj_description/meshes"/>
+
+  <material name="pearl"><color rgba="0.93 0.92 0.89 1"/></material>
+  <material name="joint_dark"><color rgba="0.17 0.18 0.22 1"/></material>
+  <material name="metal"><color rgba="0.56 0.58 0.64 1"/></material>
+
+  <!-- A link with the same STL for visual and collision. -->
+  <xacro:macro name="mesh_link" params="name file material xyz:='0 0 0' rpy:='0 0 0' scale:='1 1 1'">
+    <link name="${name}">
+      <visual>
+        <origin xyz="${xyz}" rpy="${rpy}"/>
+        <geometry><mesh filename="${mesh_dir}/${file}" scale="${scale}"/></geometry>
+        <material name="${material}"/>
+      </visual>
+      <collision>
+        <origin xyz="${xyz}" rpy="${rpy}"/>
+        <geometry><mesh filename="${mesh_dir}/${file}" scale="${scale}"/></geometry>
+      </collision>
+    </link>
+  </xacro:macro>
+
+  <link name="world"/>
+  <joint name="world_to_base" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+  </joint>
+
+  <!-- Base (fixed). Turned 180 deg about the J1 axis: on this robot the cable
+       connectors are on the opposite side of the base from where the arm reaches
+       at home (confirmed by the user 2026-09-24); kinematics are unaffected. -->
+  <xacro:mesh_link name="base_link" file="baza.stl" material="pearl" rpy="0 0 ${pi}"/>
+
+  <!-- Waist: rotates with J1. Its J2 hub centre is 131.9 mm above the mesh origin,
+       so it sits on top of the base (168.1 mm) with the hub on the J2 axis. -->
+  <xacro:mesh_link name="link1" file="1brat.stl" material="pearl" xyz="0 0 0.1681"/>
+  <joint name="j1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="${lim['J1'][0] * deg}" upper="${lim['J1'][1] * deg}" velocity="${180 * deg}" effort="100"/>
+  </joint>
+
+  <!-- Upper arm: J2 axis 300 mm up, 250 mm long. -->
+  <xacro:mesh_link name="link2" file="2brat.stl" material="pearl"/>
+  <joint name="j2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0 0.300" rpy="0 ${-zoff.get('J2', 0.0) * deg} 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="${lim['J2'][0] * deg}" upper="${lim['J2'][1] * deg}" velocity="${90 * deg}" effort="100"/>
+  </joint>
+
+  <!-- Forearm: 160 mm to the J5 axis. -->
+  <xacro:mesh_link name="link3" file="3brat.stl" material="pearl"/>
+  <joint name="j3" type="revolute">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0 0 0.250" rpy="0 ${-zoff.get('J3', 0.0) * deg} 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="${lim['J3'][0] * deg}" upper="${lim['J3'][1] * deg}" velocity="${135 * deg}" effort="100"/>
+  </joint>
+
+  <!-- Wrist (J5 pitch): 72 mm to the flange face. -->
+  <xacro:mesh_link name="link5" file="4brat.stl" material="joint_dark"/>
+  <joint name="j5" type="revolute">
+    <parent link="link3"/>
+    <child link="link5"/>
+    <origin xyz="0 0 0.160" rpy="0 ${-zoff.get('J5', 0.0) * deg} 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="${lim['J5'][0] * deg}" upper="${lim['J5'][1] * deg}" velocity="${180 * deg}" effort="100"/>
+  </joint>
+
+  <!-- Flange (J6 roll about the tool axis); its frame is on the flange face. -->
+  <xacro:mesh_link name="link6" file="flansa.stl" material="joint_dark"/>
+  <joint name="j6" type="revolute">
+    <parent link="link5"/>
+    <child link="link6"/>
+    <origin xyz="0 0 0.072"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="${lim['J6'][0] * deg}" upper="${lim['J6'][1] * deg}" velocity="${210 * deg}" effort="100"/>
+  </joint>
+
+  <link name="tool0"/>
+  <joint name="flange_to_tool0" type="fixed">
+    <parent link="link6"/>
+    <child link="tool0"/>
+  </joint>
+
+  <!-- The table the robot stands on (2026-09-28): top face = base mounting plane (Z 0),
+       1 mm below it so it never touches the base. Lets MoveIt refuse any move that
+       would put the arm or gripper into the table. -->
+  <link name="table">
+    <visual>
+      <origin xyz="0 0 -0.021"/>
+      <geometry><box size="1.4 1.4 0.04"/></geometry>
+      <material name="metal"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.021"/>
+      <geometry><box size="1.4 1.4 0.04"/></geometry>
+    </collision>
+  </link>
+  <joint name="world_to_table" type="fixed">
+    <parent link="world"/>
+    <child link="table"/>
+  </joint>
+
+  <!-- Festo HGP-16 gripper with fingers, collision only and generous: 80 x 80 mm,
+       120 mm out from the flange face along the tool axis. -->
+  <link name="gripper_envelope">
+    <collision>
+      <origin xyz="0 0 0.060"/>
+      <geometry><box size="0.08 0.08 0.12"/></geometry>
+    </collision>
+  </link>
+  <joint name="flange_to_gripper_envelope" type="fixed">
+    <parent link="link6"/>
+    <child link="gripper_envelope"/>
+  </joint>
+
+  <xacro:if value="$(arg with_tool_mesh)">
+    <xacro:mesh_link name="tool" file="efector.stl" material="metal"/>
+    <joint name="flange_to_tool" type="fixed">
+      <parent link="link6"/>
+      <child link="tool"/>
+    </joint>
+  </xacro:if>
+</robot>

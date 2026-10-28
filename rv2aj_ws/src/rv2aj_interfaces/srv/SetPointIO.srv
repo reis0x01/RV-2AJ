@@ -1,0 +1,9 @@
+# Attach (or remove) one station-output action on a saved point: set output
+# `output` to `value` after the point is reached (same slot as the gripper).
+string name
+int32 output                # 0-15 general, or 900-907 hand/pneumatic
+bool value                  # ignored if clear is true
+bool clear                  # true: remove this output's action from the point
+---
+bool success
+string message

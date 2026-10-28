@@ -1,0 +1,8 @@
+string name                 # empty: next free P<n> (or P1A, P1B ... when inserting after P1)
+string after                # insert the new point right after this point; empty = at the end
+int32 speed_percent         # this point's speed 1-100%; 0 = use the robot's current override (new
+                             # point) or keep the point's existing speed (re-saving an existing name)
+---
+bool success
+string message
+string name

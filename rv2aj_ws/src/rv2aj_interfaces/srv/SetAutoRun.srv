@@ -1,0 +1,10 @@
+# Arm/disarm sensor-triggered auto-run. The sensor is mounted on the TCP, so a
+# reading is trusted ONLY while the arm is idle and parked at home (near the parts):
+# a part seen there runs one full pass through all saved points, then the arm returns
+# home and waits for the next part. Readings taken mid-pass (sensor in the air) are
+# ignored. Only runs while the servo is ON (a human enables the servo; auto-run never does).
+bool enable
+int32 input_bit     # input to watch, 0-15; -1 = keep the current/default (IN1, TCP sensor)
+---
+bool success
+string message

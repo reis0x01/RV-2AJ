@@ -1,0 +1,11 @@
+# Velocities: RV-2AJ maximum joint speeds from BFP-A8050 (deg/s -> rad/s).
+# Accelerations are not in the manual; conservative values for time
+# parameterisation only (the controller times its own moves).
+default_velocity_scaling_factor: 0.1
+default_acceleration_scaling_factor: 0.1
+joint_limits:
+  j1: {has_velocity_limits: true, max_velocity: 3.1416, has_acceleration_limits: true, max_acceleration: 3.0}
+  j2: {has_velocity_limits: true, max_velocity: 1.5708, has_acceleration_limits: true, max_acceleration: 3.0}
+  j3: {has_velocity_limits: true, max_velocity: 2.3562, has_acceleration_limits: true, max_acceleration: 3.0}
+  j5: {has_velocity_limits: true, max_velocity: 3.1416, has_acceleration_limits: true, max_acceleration: 3.0}
+  j6: {has_velocity_limits: true, max_velocity: 3.6652, has_acceleration_limits: true, max_acceleration: 3.0}

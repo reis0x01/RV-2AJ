@@ -1,0 +1,30 @@
+# Software joint limits in degrees, the single source for the URDF (MoveIt) and
+# the rv2aj planner (rv2aj_control/kinematics.py).
+#
+# The controller's own limits (parameter MEJAR, set on the pendant) are the real
+# authority: it refuses any target outside them before the robot moves. These
+# are set to +-360 deg so the software never refuses a move on angle: only the
+# controller does (J1 on this robot goes past +-180). Narrow them only if you
+# want an extra margin inside MEJAR.
+#
+# 2026-10-19: the operator switched the software limits OFF ([-720, 720] below): the
+# planner and MoveIt no longer stop a move on angle. Only the controller's
+# MEJAR (found wide open on 2026-10-16) and MoveIt collision checks remain. The measured
+# limits are kept in each comment.
+J1: [-720.0, 720.0]   # limits OFF (operator 2026-10-19); measured: [-327.5, -21.5]    # measured 2026-09-28: controller alarms at -329.7 / -19.5
+J2: [-720.0, 720.0]   # limits OFF (operator 2026-10-19); measured: [-150.0, 0.5]      # measured: alarm at +2.7; -152 is where the gripper nears the table
+J3: [-720.0, 720.0]   # limits OFF (operator 2026-10-19); measured: [-43.0, 210.0]     # measured 2026-09-28: alarms at -44.7 / +181.6 (factory MEJAR then). 2026-10-16: MEJAR found wide open and the operator jogged J3 to 194.41 (points P3A-P3C) -> max raised to 196.0; operator chose 210.0 the same day
+J5: [-720.0, 720.0]   # limits OFF (operator 2026-10-19); measured: [-272.0, -84.0]    # measured 2026-09-28: controller limit alarms at -274 / -82.0
+J6: [-720.0, 720.0]   # limits OFF (operator 2026-10-19); measured: [-425.0, 335.0]    # no alarm anywhere in the tested -425.7 .. +339.3
+
+# Joints that must not move (e.g. a hardware fault): straight-line moves keep them and
+# let the tool pitch change instead, joint targets keep their current angle, direct
+# commands to them are refused. Example: frozen_joints: [J5]
+frozen_joints: []
+
+# Joint READING when the joint is physically at the model's zero (J2/J3/J5: arm
+# pointing straight up). Needed when the controller's origin was set elsewhere
+# (2026-09-28: a horizontal circle came out vertical). 0 = controller zeros are right.
+zero_offsets_deg: {J2: -128.62, J3: 90.2, J5: -175.69}   # read with the arm straight up, 2026-10-19
+# 2026-09-28 values were {J2: -90.3, J3: 66.16, J5: -173.11}; the controller's zeros had moved since
+# (TCP 'down' came out 26 deg off vertical). Re-measure after any origin change on the pendant.

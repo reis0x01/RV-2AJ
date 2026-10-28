@@ -1,0 +1,7 @@
+The STL meshes in this directory (baza, 1brat, 2brat, 3brat, 4brat, flansa,
+efector) come from https://github.com/TheMalaland/_Mitsubishi_Melfa_RV_2AJ
+(exported from its robot_nou.SLDASM SolidWorks model), licensed under the
+Apache License 2.0 (see LICENSE). They are an approximate community model,
+not Mitsubishi CAD. Fitting the joint hubs shows the parts are true scale and
+match the official link lengths (BFP-A8050) to about 2 mm, so the URDF uses
+them unscaled.
