@@ -48,7 +48,7 @@ Reset alarm; the driver cycles the servo, since the first move after a reset fai
 
 ```
 rv2aj_ws/src/
-  rv2aj_description/     URDF, meshes, config/joint_limits.yaml (limits, zero offsets)
+  rv2aj_description/     URDF, meshes, config/joint_limits.yaml
   rv2aj_moveit_config/   SRDF and MoveIt launch
   rv2aj_interfaces/      messages, services, actions
   rv2aj_control/         nodes, config/rv2aj.yaml, launch, tests
@@ -97,9 +97,6 @@ All nodes run under `/rv2aj`.
 Straight TCP moves are solved with IK every 5 mm and split into waypoints that stay within 1 mm of
 the line. Joint moves use a straight joint-space path, or OMPL if that collides.
 
-Software joint limits are currently off (±720° in `joint_limits.yaml`); the measured limits are
-kept there as comments.
-
 ```bash
 ros2 topic echo --once /rv2aj/status
 ros2 action send_goal /rv2aj/planned/tcp_move rv2aj_interfaces/action/TcpMove "{axis: Z, distance_mm: 10.0}"
@@ -111,8 +108,6 @@ ros2 action send_goal /rv2aj/planned/tcp_move rv2aj_interfaces/action/TcpMove "{
   speed, teach points with a Slow (35 %) / Fast (60 %) speed per point, loop and auto-run.
 - **Maintenance & safety tab:** STOP ALL (robot stop, servo off, auto-run off and a latched
   conveyor stop), robot controls, manual stopper release, and a read-only view of every signal.
-
-STOP ALL is a software stop. The hardware E-stop is the safety stop.
 
 **Auto-run:** when armed, the sequencer runs one pass through the points each time a part is ready,
 signalled by the PLC or by the part sensor on IN1. A pass only starts with the arm parked at home
