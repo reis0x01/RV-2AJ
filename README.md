@@ -287,39 +287,7 @@ All robot-specific numbers live in **one file**:
 the kinematics library (planner, driver) and the GUI. After editing it, rebuild
 (`colcon build --packages-select rv2aj_description rv2aj_control`) and restart.
 
-### 5.1 Origin and zero offsets
-
-On 2026-09-28 the operator re-set the controller's origin. The new zeros are **not** the real
-"arm straight up" pose, so the controller's own X/Y/Z (and our model, which agreed with it)
-was wrong: a "horizontal" circle came out vertical.
-
-Fix (software calibration, the operator's choice): the arm was jogged **straight up** (upper arm,
-forearm and wrist in one vertical line) and the readings were stored:
-
-```yaml
-zero_offsets_deg: {J2: -90.3, J3: 66.16, J5: -173.11}
-```
-
-Everything geometric uses `reading − offset`:
-- `kinematics.fk()` / `ik()` (planner, driver, GUI, simulator),
-- the URDF joint origins (turned by −offset, so MoveIt's model and the table check match reality),
-- the tool position shown in the GUI (computed from the corrected model instead of the controller's `PPOSF`),
-- the joint-limit probe's table guard.
-
-Check: with the offsets, the arm straight up computes to **X 0, Y 0, Z 782 mm** (300+250+160+72), and the
-measured joint ranges minus the offsets match the manual (J3 −110.9…115.4, J5 −100.9…91.1, J2 −61.7…93).
-
-Consequences:
-- The controller's own Cartesian moves (`EXECMOV PTMP`) and circular moves (`MVC`) use the uncorrected
-  frame, so the driver **refuses its direct TCP move** while calibrated; all straight moves go through the
-  corrected planner instead.
-- **J1's zero is not calibrated** (it does not affect up/down or flatness, but it decides which way
-  "left/right" point). Check that the TCP **Left** button moves the tool left.
-- The clean long-term fix is to redo the origin on the pendant with the **origin data** method (factory
-  codes from the origin data sheet: `MENU → ORIGIN/BRK → ORIGIN → DATA`, see BFP-A8050 "Setting the origin").
-  Then the controller's own frame is right, smooth `MVC`/`MVR` circles become possible, and the offsets can be set back to 0.
-
-### 5.2 Measured joint limits (2026-09-28)
+### 5.1 joint limits
 
 Measured on the real robot with `test/probe_joint_limits.py` (5° steps at 5 % speed until the controller
 alarmed), limits set about 2° inside the alarm points. Values are controller readings.
@@ -334,7 +302,7 @@ alarmed), limits set about 2° inside the alarm points. Values are controller re
 
 Rule everywhere: a joint already outside its range may stay or move back in, never further out.
 
-### 5.3 Home pose
+### 5.2 Home pose
 
 The operator's home (controller readings), saved in `rv2aj.yaml` (sequencer), the node
 defaults and the SRDF group state `home`. It was moved on 2026-10-21 to the pick/wait position
@@ -352,7 +320,7 @@ Old points taught before the origin reset were backed up to
 Current taught points are snapshotted into `points_backups/<timestamp>/` (the live file,
 `~/.ros/rv2aj_points.json`, is outside the repo).
 
-### 5.4 Table and gripper in the model
+### 5.3 Table and gripper in the model
 
 The URDF contains:
 - **`table`** — a 1.4 × 1.4 m slab whose top is the base mounting plane (Z = 0).
@@ -362,7 +330,7 @@ MoveIt (`/check_state_validity`) refuses any pose where the arm or the gripper t
 (verified: "wrist into the table" and "fingers into the table" are refused, the same poses 10 cm higher are allowed).
 Other station parts are **not** modelled.
 
-### 5.5 Frozen joints (for a real hardware fault)
+### 5.4 Frozen joints (for a real hardware fault)
 
 ```yaml
 frozen_joints: []          # e.g. [J5]
