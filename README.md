@@ -631,7 +631,7 @@ Official I/O map (robot = "Robot with assembly", Station 4, connector XPA4):
 
 ---
 
-### 9.1 Conveyor PLC link (S7-1200, 2026-10-27)
+### Conveyor PLC link (S7-1200)
 
 The unreached Festo master controller is replaced by an **S7-1200** that runs three stopper stations; the laptop runs the robot
 pass when the PLC says a full car is waiting. Network: PLC → TP-Link router (Ethernet) → laptop (Wi-Fi).
