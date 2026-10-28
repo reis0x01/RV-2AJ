@@ -1,6 +1,6 @@
 # rules.md — standing rules for the RV-2AJ project
 
-Taken from the project's README (§14 Safety and conventions stated there). Add new rules as the user gives them.
+Taken from the project's safety conventions. Add new rules as the user gives them.
 
 ## Safety (hardware)
 
@@ -18,9 +18,10 @@ Taken from the project's README (§14 Safety and conventions stated there). Add 
 
 ## Working conventions
 
-- Robot-specific numbers live only in `rv2aj_description/config/joint_limits.yaml`; home/auto-run settings in `rv2aj_control/config/rv2aj.yaml`. After changing them: rebuild + restart (README §15 item 9).
+- Robot-specific numbers live only in `rv2aj_description/config/joint_limits.yaml`; home/auto-run settings in `rv2aj_control/config/rv2aj.yaml`. After changing them: rebuild + restart.
 - Tests must keep the generic-robot fixture (`test/conftest.py`) so real calibration does not leak into tests.
-- Only claim something is verified on hardware when it was; README marks CONFIRMED/OBSERVED vs hypothesis — keep that distinction.
+- Only claim something is verified on hardware when it was; keep verified and unverified clearly apart in the docs.
 - Back up taught points into `points_backups/<timestamp>/` before changes that could affect them.
 - Keep everything offline-capable (no online-only services).
 - Before deleting project files, make a full backup into `~/Documents/RV-2AJ-backups/` (user, 2026-10-27).
+- README style (user, 2026-10-28): no dates, no history, no decision notes ("operator's choice"); plain technical prose that reads as written by a person.

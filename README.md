@@ -1,621 +1,494 @@
-# RV-2AJ Robot Cell — Complete Project Documentation
+# RV-2AJ Robot Cell
 
-Control software for a **Mitsubishi MELFA RV-2AJ** robot arm (controller **CR1-571**) standing on
-**Station 4 of a Festo MPS 500 transfer line**, with a PyQt control panel, a ROS 2 + MoveIt motion
-stack, and a link to the conveyor's new Siemens S7-1200 PLC.
+Control software for a Mitsubishi MELFA RV-2AJ arm (controller CR1-571) on Station 4 of a
+Festo MPS 500 transfer line. It has three parts:
 
-This document describes everything in the project: the hardware and how it is wired, the serial
-protocol and every command that was verified on the real controller, the calibration of this
-particular robot, every ROS node, topic, service and parameter, the transfer-line and PLC integration, all tools and tests,
-day-to-day operation, troubleshooting, safety rules, known issues and the project history.
+- a ROS 2 + MoveIt stack that drives the controller over RS-232,
+- a PyQt control panel for the operator,
+- a link to the S7-1200 PLC that runs the conveyor stoppers.
 
-> Last updated: 2026-10-28. (See [§16 Project history](#16-project-history): the Maintenance & safety tab (§8.2),
-> the conveyor PLC link (§9.1) and the move to ROS 2 Lyrical.)
-
----
-
-## Screenshots & demos
-
-**The real RV-2AJ running the 44-point assembly** on Station 4 of the Festo MPS 500 line — the
-full taught sequence (per-point speeds and gripper/I/O actions) executed by the robot over RS-232
-(sped up ~19×; the full video runs about 4.5 minutes):
+The real robot running the taught assembly sequence (sped up about 19×):
 
 <img src="docs/images/real_robot_assembly.gif" width="100%" alt="RV-2AJ real assembly">
 
-**The operator control panel** (`gui_node.py`, started with `./start_robot.sh`) — live joints,
-TCP pose, Motion (servo / speed / joint step / home), Points & Loop with the per-point
-**Slow/Fast** speed buttons, the Gripper card, the full **Station I/O** panel (IN/OUT groups
-including the pneumatics); a second tab holds Maintenance & safety (§8.2).
+The control panel:
 
 <img src="docs/images/gui_control_panel.png" width="100%" alt="RV-2AJ control panel">
-
-> More images (the live robot and cell, loops running) are best captured on
-> the hardware — drop them in `docs/images/` and reference them here.
-
----
 
 ## Contents
 
 1. [Quick start](#1-quick-start)
-2. [The hardware](#2-the-hardware)
+2. [Hardware](#2-hardware)
 3. [Repository layout](#3-repository-layout)
-4. [Serial protocol and verified commands](#4-serial-protocol-and-verified-commands)
-5. [Calibration of this robot](#5-calibration-of-this-robot)
-6. [ROS 2 stack (rv2aj_ws)](#6-ros-2-stack-rv2aj_ws)
-7. [Motion: how a move is planned and executed](#7-motion-how-a-move-is-planned-and-executed)
-8. [The control panel (GUI)](#8-the-control-panel-gui)
-9. [Festo MPS 500 transfer line](#9-festo-mps-500-transfer-line)
-10. [Tools, scripts and tests](#10-tools-scripts-and-tests)
-11. [Offline operation, memory and performance](#11-offline-operation-memory-and-performance)
-12. [Files the system writes](#12-files-the-system-writes)
-13. [Troubleshooting](#13-troubleshooting)
-14. [Safety](#14-safety)
-15. [Known issues and open items](#15-known-issues-and-open-items)
-16. [Project history](#16-project-history)
+4. [Serial protocol](#4-serial-protocol)
+5. [Robot calibration](#5-robot-calibration)
+6. [ROS 2 stack](#6-ros-2-stack)
+7. [How a move is executed](#7-how-a-move-is-executed)
+8. [Control panel](#8-control-panel)
+9. [Transfer line and PLC link](#9-transfer-line-and-plc-link)
 
 ---
 
 ## 1. Quick start
 
-### First time on a new machine
+### Install and build
 
 ```bash
-git clone git@github.com:reis0x01/RV-2AJ.git ~/Desktop/RV-2AJ
-cd ~/Desktop/RV-2AJ/rv2aj_ws
+git clone git@github.com:reis0x01/RV-2AJ.git
+cd RV-2AJ/rv2aj_ws
 source /opt/ros/lyrical/setup.bash        # or jazzy
 colcon build && source install/setup.bash
-cd src/rv2aj_control && python3 -m pytest -q test/     # should all pass
+cd src/rv2aj_control && python3 -m pytest -q test/
 ```
 
-Needs ROS 2 (Lyrical or Jazzy) with MoveIt 2, xacro and robot_state_publisher, plus `python3-pyqt5`,
-`python3-scipy`, `python3-serial` and (for the conveyor link) `python-snap7`. Teach points are not in the
-repository: they live in `~/.ros/rv2aj_points.json`; copy one from `points_backups/` to start with the taught set.
+Requirements: ROS 2 (Lyrical or Jazzy) with MoveIt 2, xacro and robot_state_publisher, plus
+`python3-pyqt5`, `python3-scipy`, `python3-serial`, and `python-snap7` for the PLC link.
 
-### Start
+Teach points are not part of the repository. The stack reads them from `~/.ros/rv2aj_points.json`;
+copy one of the files in `points_backups/` there to start with the taught sequence.
 
-```bash
-cd ~/Desktop/RV-2AJ
-./start_robot.sh               # real robot
-```
-
-| Command | What it starts |
-|---|---|
-| `./start_robot.sh` | real robot on `/dev/ttyUSB0` |
-| `./start_robot.sh sim` | simulated controller, no robot needed |
-| `./start_robot.sh real /dev/ttyUSB1` | real robot on another serial port |
-
-The window opens after about 15–20 s. The terminal may be closed afterwards: the stack runs in its
-own systemd scope (`rv2aj-stack`) and survives the terminal or VS Code closing.
-
-`start_robot.sh` also:
-- refuses to start in real mode if the serial port does not exist ("plug in the USB-serial adapter");
-- refuses if the stack is already running;
-- uses whichever ROS 2 is installed (`/opt/ros/lyrical`, else `/opt/ros/jazzy`);
-- waits until systemd has fully released a previous `rv2aj-stack` scope before starting.
-
-### Stop
+### Start and stop
 
 ```bash
+./start_robot.sh                     # real robot on /dev/ttyUSB0
+./start_robot.sh sim                 # simulated controller, no hardware
+./start_robot.sh real /dev/ttyUSB1   # real robot on another port
 ./stop_robot.sh
 ```
 
-Takes about 5 s. It sends SIGINT first (so the driver can send STOP, SRVOFF, CNTLOFF to the
-controller), force-closes leftovers (the GUI ignores the normal stop signal), and
-waits until the scope is really gone so `start_robot.sh` works immediately afterwards.
+The panel opens after 15–20 s. The stack runs in its own systemd scope (`rv2aj-stack`), so closing
+the terminal does not stop it. The start script refuses to run if the serial port is missing or the
+stack is already running, and picks whichever ROS 2 is installed under `/opt/ros`.
 
-### First steps after starting
+Always stop with `./stop_robot.sh`. It sends SIGINT first so the driver can send STOP, SRVOFF and
+CNTLOFF to the controller, then kills whatever is left and waits until the scope is gone.
 
-1. The header shows **CONNECTED** and **NO ALARM**.
-2. Press **Servo ON** (only a person can do this — no code ever switches the servo on).
-3. Move the robot: jog buttons, **Home**, points, the TCP arrow buttons.
-4. Stop at any time: **`+`**, **Esc**, the red **STOP** button, or the hardware E-stop.
+### Using it
 
-### After an alarm
+1. Check that the header shows CONNECTED and NO ALARM.
+2. Press Servo ON. Only a person does this; no code ever switches the servo on.
+3. Move the arm with the jog buttons, Home, taught points or the TCP arrows.
+4. To stop: `+`, Esc, the STOP button, or the hardware E-stop.
 
-Press **Reset alarm**. The driver then switches the servo off and on again automatically — on this
+After an alarm, press Reset alarm. The driver then cycles the servo off and on, because on this
 robot the first move after an alarm reset fails otherwise.
 
-### Logs
-
-- Stack log: `~/.ros/rv2aj_stack.log`
+The full stack output goes to `~/.ros/rv2aj_stack.log`.
 
 ---
 
-## 2. The hardware
+## 2. Hardware
 
-### 2.1 Robot arm — Mitsubishi MELFA RV-2AJ
+### Arm: MELFA RV-2AJ
 
-- 5-axis vertical articulated arm. Joints: **J1** base/waist rotation, **J2** shoulder, **J3** elbow,
-  **J5** wrist pitch (tilt), **J6** wrist roll. **There is no J4** (the controller reports it as `****`).
-  With 5 axes the tool can pitch and roll but cannot yaw sideways, so some orientations are impossible.
-- Geometry (manual BFP-A8050, Fig. 2-5; confirmed against the controller's own positions to < 0.05 mm):
-  - shoulder (J2) axis **300 mm** above the mounting face,
-  - upper arm **250 mm**, forearm **160 mm**,
-  - J5 axis to flange face **72 mm**, no lateral offsets.
-- Catalogue values (not verified on this unit): 2 kg payload, ~410 mm reach, ±0.02 mm repeatability, ~17 kg.
-- AC servo motors, absolute encoders backed by batteries. If the batteries run low the origin is lost
-  (controller error 5150 "The origin has not been set", every EXEC command is then refused).
-- The base is mounted turned 180° relative to the manual's drawing: at home the arm reaches away
-  from the cable connectors. The URDF base mesh has a 180° yaw for this.
+- 5 axes: J1 waist, J2 shoulder, J3 elbow, J5 wrist pitch, J6 wrist roll. There is no J4 (the
+  controller reports it as `****`), so the tool can pitch and roll but not yaw.
+- Geometry (manual BFP-A8050, checked against the controller's positions to within 0.05 mm):
+  shoulder axis 300 mm above the mounting face, upper arm 250 mm, forearm 160 mm,
+  J5 axis to flange 72 mm, no lateral offsets.
+- Absolute encoders with battery backup. When the batteries run low the origin is lost and the
+  controller refuses every EXEC command with error 5150.
+- The base is mounted turned 180° from the manual's drawing; the URDF base has a 180° yaw for this.
 
-### 2.2 Controller — CR1-571
+### Controller: CR1-571
 
-- Language MELFA-BASIC IV. Commands can be executed directly over the RS-232 port ("EXEC" commands).
-- Its own joint limits (parameter **MEJAR**, set on the teach pendant) are the final authority; they
-  are not readable over serial. The operator has widened them.
-- Standard I/O on the 50-pin CN100 connector (card RZ386/RZ387). Outputs need an external 12/24 V supply.
-  Factory-dedicated signals: OUT0 running, OUT1 servo on, OUT2 error, OUT3 operation rights;
-  IN0 STOP (fixed), IN1 servo off, IN2 error reset, IN3 start, IN4 servo on, IN5 operation rights.
+- MELFA-BASIC IV. Commands are run directly over RS-232 as EXEC commands.
+- The controller's own joint limits (parameter MEJAR, set on the teach pendant) are the final
+  authority. They cannot be read over serial.
+- Standard I/O is on the 50-pin CN100 connector. OUT0–OUT3 and IN0–IN5 are factory-dedicated
+  (running, servo on, error, operation rights / stop, servo off, reset, start, servo on, operation rights).
 
-### 2.3 Gripper — Festo HGP-16
+### Gripper: Festo HGP-16
 
-- Pneumatic parallel gripper, up to 160 N at 6 bar. Air hoses run around the wrist (watch them
-  when J6 turns a lot).
-- Commanded with the controller's hand commands `EXECHOPEN 1` / `EXECHCLOSE 1` (accepted with QoK;
-  physical jaw motion was observed by the operator). 
+Pneumatic parallel gripper, 160 N at 6 bar, driven with `EXECHOPEN 1` / `EXECHCLOSE 1`.
+The air hoses run around the wrist, so watch them when J6 turns a lot.
 
-### 2.4 The cell
+### Cell
 
-- The robot stands on the Station 4 table of a **Festo MPS 500** transfer line ("Robot with assembly").
-- Around the base: a blue block in front, a chute and pneumatic parts on the right, conveyor rails
-  around the back. **These stick up above the table surface and are not in the collision model**
-  (only the flat table is) — keep watching moves near them.
-- The station is connected with a 24-pin SysLink cable at connector **XPA4** (see section 9).
+The robot sits on the Station 4 table ("Robot with assembly"), connected to the station through
+the SysLink connector XPA4. A blue block, a chute, pneumatic parts and the conveyor rails stick up
+above the table. Only the flat table is in the collision model, so moves near those parts need watching.
 
-### 2.5 PC and link
+### PC link
 
-- Laptop: Ryzen 5 6600, **RTX 3050 Laptop 4 GB**, **7 GB RAM** (VS Code alone uses ~3 GB), Ubuntu 24.04, ROS 2 Jazzy.
-- Serial: **FTDI FT232 USB-serial adapter** → `/dev/ttyUSB0`, **9600 baud, 8 data bits, even parity, 2 stop bits (8E2)**.
-  The user must be in the `dialout` group (they are).
-- The adapter has dropped off the bus a few times; the very first open after plugging it in once
-  returned ~40 KB of garbage (the next open was clean).
+FTDI FT232 USB-serial adapter on `/dev/ttyUSB0`, 9600 baud, 8 data bits, even parity, 2 stop bits.
+The user must be in the `dialout` group. The adapter occasionally drops off the bus.
 
 ---
 
 ## 3. Repository layout
 
 ```
-~/Desktop/RV-2AJ/
-├── README.md                  this file
-├── start_robot.sh             start everything (see 1.)
-├── stop_robot.sh              stop everything
-├── rv2aj_ws/                  ROS 2 workspace (the main system)
-│   └── src/
-│       ├── rv2aj_description/     URDF/xacro, meshes, config/joint_limits.yaml (limits, calibration)
-│       ├── rv2aj_moveit_config/   MoveIt config: SRDF (home, collisions), moveit.launch.py
-│       ├── rv2aj_interfaces/      custom messages, services, actions
-│       └── rv2aj_control/         all nodes, config, tests
-│           ├── rv2aj_control/     Python package (nodes + libraries)
-│           ├── config/            rv2aj.yaml
-│           ├── launch/            bringup.launch.py
-│           └── test/              pytest tests, fake PLC, joint-limit probe
-├── plc/LineControl.scl        S7-1200 program: 3 stopper stations + robot handshake (§9.1)
+RV-2AJ/
+├── start_robot.sh, stop_robot.sh
+├── rv2aj_ws/src/
+│   ├── rv2aj_description/     URDF/xacro, meshes, config/joint_limits.yaml
+│   ├── rv2aj_moveit_config/   SRDF, MoveIt config and launch
+│   ├── rv2aj_interfaces/      messages, services, actions
+│   └── rv2aj_control/         nodes, libraries, config/rv2aj.yaml, launch, tests
+├── plc/LineControl.scl        S7-1200 program for the stopper stations
 ├── docu/                      write-ups (S7-1200 retrofit, robot control methods)
-├── docs/images/               screenshots and demo GIFs
-├── rules.md                   standing rules
-└── points_backups/            exported teach-point backups (joints, speeds, gripper, I/O)
+├── docs/images/               images used in this README
+└── points_backups/            teach-point snapshots
 ```
 
-> Note: build artifacts (`rv2aj_ws/build|install|log`) are regenerated by `colcon build` and are gitignored.
+Runtime files are written to `~/.ros/`:
 
-Outside the project:
-- `~/.ros/` — runtime files (points, logs; section 12).
-- `~/Documents/RV-2AJ-backups/` — full project backups.
+| File | Content |
+|---|---|
+| `rv2aj_points.json` | taught points (real robot) |
+| `rv2aj_sim/points.json` | the simulator's own points |
+| `rv2aj_stack.log` | stack output |
+| `rv2aj_joint_limit_probe.txt` | joint-limit probe results |
 
 ---
 
-## 4. Serial protocol and verified commands
+## 4. Serial protocol
 
-### 4.1 Framing
+### Framing
 
-- Every command is sent as `1;1;<COMMAND>\r`.
-- Replies end with `\r`. A reply starting with **`Qo`** means OK, **`Qe`** / **`Qx`** means error.
-- A **lowercase** status letter (`Qok`, `Qer`) means an alarm is pending; `RSTALRM` clears it.
-- Error replies encode the error number: `QeR422000000` → error 4220. `ERRORMES<n>` returns its text.
+- Every command is sent as `1;1;<COMMAND>\r`; replies end with `\r`.
+- `Qo…` means OK, `Qe…` / `Qx…` means error. A lowercase status (`Qok`, `Qer`) means an alarm is pending.
+- Error replies carry the number: `QeR422000000` is error 4220. `ERRORMES<n>` returns its text.
 
-### 4.2 Read-only queries (used by the poll loop)
+### Queries
 
-| Command | Reply example | Meaning |
+| Command | Example reply | Meaning |
 |---|---|---|
-| `STATE` | `QoK1.MB4;10;100;4;01060;1;1;;;;;;;;;REP;START;1;0` | program, line, **override %**, …, **last error field** |
-| `JPOSF` | `QoKJ1;-149.72;J2;-64.62;J3;137.13;J4;****;J5;-92.73;J6;-72.67;...` | joint angles (J4 `****`) |
-| `PPOSF` | `QoKX;84.78;Y;49.46;Z;522.81;A;-221.18;B;-20.22;...` | tool position in the controller's frame |
-| `VALM_INB(0)` / `VALM_OUTB(0)` | `QoKM_INB=+16` | I/O byte 0 (bits 0–7) |
-| `VALM_IN(n)` / `VALM_OUT(n)` | `QoKM_OUT(4)=+0` | single input/output |
-| `VALM_ERR`, `VALM_ERRNO`, `VALM_ERRLVL` | `QoKM_ERRNO=+0` | active error state |
-| `VALJTMP`, `VALPTMP` | `QoKJTMP=(-156.60,-6.49,+145.55,+0.00,-34.60,+61.33)` | read back a variable |
-| `ERRORMES<n>` | `QoKEncoder communication error` | error text |
+| `STATE` | `QoK1.MB4;10;100;4;01060;1;1;;;…` | program, line, override %, …, last error |
+| `JPOSF` | `QoKJ1;-149.72;J2;-64.62;J3;137.13;J4;****;…` | joint angles |
+| `PPOSF` | `QoKX;84.78;Y;49.46;Z;522.81;A;-221.18;B;-20.22;…` | tool pose in the controller frame |
+| `VALM_INB(0)` / `VALM_OUTB(0)` | `QoKM_INB=+16` | I/O byte (bits 0–7) |
+| `VALM_IN(n)` / `VALM_OUT(n)` | `QoKM_OUT(4)=+0` | single bit |
+| `VALM_ERR`, `VALM_ERRNO` | `QoKM_ERRNO=+0` | active error |
+| `VALJTMP`, `VALPTMP` | `QoKJTMP=(-156.60,-6.49,…)` | read back a variable |
 
-**Important — reading `STATE`:** its 5th field (`01060`, `A1060`, `81062000`…) contains the **last
-recorded** error, not necessarily an active one. An active joint-range alarm appears as
-**`81069x`** where **x is the axis** (`8106961` = J1, `…62` J2, `…63` J3, `…65` J5). Use
-`VALM_ERR` / `VALM_ERRNO` to know whether an error is active. (Misreading this once led to a
-wrong "J5 encoder fault" diagnosis — see section 16.)
+The fifth field of `STATE` is the last recorded error, not necessarily an active one. Use
+`VALM_ERR` / `VALM_ERRNO` to check for an active error. A joint-range alarm shows up there as
+`81069x`, where x is the axis (`8106961` = J1, `…62` = J2, and so on).
 
-### 4.3 State-changing commands (verified)
+### Commands
 
 | Purpose | Commands |
 |---|---|
-| Operation rights | `CNTLON` / `CNTLOFF` (needed before EXEC commands; otherwise error 6020 "The Operation is disable") |
+| Operation rights | `CNTLON` / `CNTLOFF` (required before any EXEC command) |
 | Servo | `SRVON` / `SRVOFF` |
-| Stop | `STOP` (halts an EXECMOV mid-move) |
+| Stop | `STOP` (also halts a running `EXECMOV`) |
 | Reset alarm | `RSTALRM` |
-| Speed override | `EXECJOVRD <1-100>` (needs CNTLON) |
-| **Relative joint move** | `EXECJTMP=J_CURR`, `EXECJTMP.J<n>=JTMP.J<n>+RAD(<deg>)`, `VALJTMP` (check), `EXECMOV JTMP` |
-| **Absolute joint move** | same as above, one `+RAD(target-current)` edit per joint (see below) |
-| **Straight TCP move** | `EXECPTMP=P_CURR`, `EXECPTMP.Z=PTMP.Z+5.00`, `VALPTMP`, `EXECMOV PTMP` |
+| Speed override | `EXECJOVRD <1-100>` |
+| Joint move | `EXECJTMP=J_CURR`, `EXECJTMP.J<n>=JTMP.J<n>+RAD(<deg>)` per joint, `VALJTMP`, `EXECMOV JTMP` |
+| Straight TCP move | `EXECPTMP=P_CURR`, `EXECPTMP.Z=PTMP.Z+5.00`, `VALPTMP`, `EXECMOV PTMP` |
 | Gripper | `EXECHOPEN 1` / `EXECHCLOSE 1` |
-| Outputs | `EXECM_OUT(n)=0/1` (after CNTLON; read back to confirm) |
-| Continuous path | `EXECCNT 1` / `EXECCNT 0` (accepted) |
+| Output | `EXECM_OUT(n)=0/1` |
 
-Behaviour notes:
-- `EXECMOV` replies `QoK` immediately; the motion continues afterwards, so the driver polls `JPOSF` until settled.
-- **A new EXECMOV while a move is running is refused**: error **5640 "Cannot execute during RUN"** — with or
-  without `CNT 1`. Moves sent over serial cannot be blended; every move stops before the next one.
-- Tuple expressions are **not** accepted: `J_CURR+(...)` gives **L4220 syntax error**. The absolute tuple form
-  `JTMP=(j1,...,j6)` was never confirmed, so absolute moves are built only from the verified component edits.
-  The simulator rejects any tuple form so this can never creep back in.
-- Every move is read back with `VAL…` and checked before `EXECMOV`; a mismatch refuses the move.
-- `OPEN` always returns `QeR601` but is harmless.
+Things to know:
 
-### 4.4 Error numbers seen on this robot
+- `EXECMOV` answers immediately and the arm keeps moving, so the driver polls `JPOSF` until it settles.
+- A new `EXECMOV` while one is running is refused with error 5640, with or without `CNT 1`. Moves
+  over serial cannot be blended; the arm stops at every point.
+- Tuple expressions such as `J_CURR+(…)` give a syntax error (4220). Absolute moves are therefore
+  built from per-joint edits, and the simulator rejects tuple forms too.
+- Every move is read back with `VAL…` and compared before `EXECMOV`; a mismatch cancels it.
+- After any alarm reset the next move fails unless the servo is switched off and on again. The
+  driver's `reset_alarm` does this.
 
-| Error | Text | Meaning here |
+### Error numbers
+
+| Error | Text | Usual cause |
 |---|---|---|
 | 0965 | Excessive error 1 | servo could not follow |
-| 1060 / 1069 | Encoder communication error | appeared as the stale "last error" in STATE |
-| 1120 | Encoder ABS position data lost | origin data lost (batteries) |
-| 4220 | Syntax error | e.g. `J_CURR+(...)` |
-| 5150 | The origin has not been set | origin lost — all EXEC commands refused |
+| 1120 | Encoder ABS position data lost | encoder batteries |
+| 4220 | Syntax error | unsupported expression |
+| 5150 | The origin has not been set | origin lost, all EXEC commands refused |
 | 5600 | Cannot execute during an error | reset the alarm first |
 | 5640 | Cannot execute during RUN | a move is still running |
-| 6010 | Illegal command | |
-| 6020 | The Operation is disable | CNTLON missing |
-| `81069x` in STATE | joint range limit on axis x | controller limit (MEJAR) reached |
-
-### 4.5 Robot quirk
-
-After any alarm reset, **the next move fails** unless the servo is switched **off and on** again.
-The driver's `reset_alarm` does this automatically; the limit probe does it too.
+| 6020 | The Operation is disable | `CNTLON` missing |
+| `81069x` | joint range limit, axis x | MEJAR limit reached |
 
 ---
 
-## 5. Calibration of this robot
+## 5. Robot calibration
 
-All robot-specific numbers live in **one file**:
-`rv2aj_ws/src/rv2aj_description/config/joint_limits.yaml`. It is read by the URDF (MoveIt),
-the kinematics library (planner, driver) and the GUI. After editing it, rebuild
+Everything specific to this arm is in one file,
+`rv2aj_ws/src/rv2aj_description/config/joint_limits.yaml`: joint limits, zero offsets and frozen
+joints. The URDF, the kinematics library and the panel all read it. After changing it, rebuild
 (`colcon build --packages-select rv2aj_description rv2aj_control`) and restart.
 
-### 5.1 joint limits
+### Joint limits
 
-Measured on the real robot with `test/probe_joint_limits.py` (5° steps at 5 % speed until the controller
-alarmed), limits set about 2° inside the alarm points. Values are controller readings.
+The software limits are currently set to ±720° on every joint, which turns them off; the
+controller's MEJAR limits are the ones that stop the arm. The measured values below are kept as
+comments next to each joint in `joint_limits.yaml` and can be put back by copying them in.
 
-| Joint | Alarm points (measured) | Limit set | Notes |
+They were measured with `test/probe_joint_limits.py`, which steps one joint 5° at a time at 5 %
+speed until the controller alarms, and set about 2° inside the alarm points.
+
+| Joint | Alarm points | Measured limit | Note |
 |---|---|---|---|
-| J1 | −329.7 / −19.5 | **−327.5 … −21.5** | + end repeated twice at −19.46 |
-| J2 | −152 (table) / +2.7 | **−150 … +0.5** | − side stopped by the table guard, not the controller |
-| J3 | −44.7 / +181.6 | **−43 … +210** | raised 2026-10-16 (operator): controller MEJAR found wide open (±1800°), arm jogged to 194.41 |
-| J5 | −274 / −82.0 | **−272 … −84** | ~192° span; the + end at −82 is where it "refused to move up" |
-| J6 | none in −425 … +339 | **−425 … +335** | tested range; the operator confirmed it is fine |
+| J1 | −329.7 / −19.5 | −327.5 … −21.5 | |
+| J2 | −152 / +2.7 | −150 … +0.5 | negative side stopped by the table |
+| J3 | −44.7 / +181.6 | −43 … +210 | upper limit opened after widening MEJAR |
+| J5 | −274 / −82.0 | −272 … −84 | |
+| J6 | none in −425 … +339 | −425 … +335 | |
 
-Rule everywhere: a joint already outside its range may stay or move back in, never further out.
+With limits active, a joint that is already outside its range may stay there or move back in,
+but never further out.
 
-### 5.2 Home pose
+The probe (`python3 test/probe_joint_limits.py J3 +`) bypasses the planner on purpose and has its own
+table guard. Someone has to stand at the E-stop while it runs.
 
-The operator's home (controller readings), saved in `rv2aj.yaml` (sequencer), the node
-defaults and the SRDF group state `home`. It was moved on 2026-10-21 to the pick/wait position
-next to the parts, where the TCP-mounted part sensor reads — this is the pose the sensor-triggered
-auto-run (§8.1) parks at and re-arms from. It coincides with the taught point **P2E**:
+### Home
 
-| J1 | J2 | J3 | J4 | J5 | J6 |
-|---|---|---|---|---|---|
-| −217.26 | −97.21 | 219.75 | — | −164.49 | −350.46 |
+Home is the pick/wait pose next to the parts, which is also the taught point P2E. It is set in
+`rv2aj.yaml` (sequencer `home_joints_deg`) and in the SRDF group state `home`.
 
-(Superseded: the earlier home was −118.49 / −101.71 / 186.64 / — / −127.75 / −279.42.)
+| J1 | J2 | J3 | J5 | J6 |
+|---|---|---|---|---|
+| −217.26 | −97.21 | 219.75 | −164.49 | −350.46 |
 
-Old points taught before the origin reset were backed up to
-`~/.ros/rv2aj_points_before_origin_reset_2026-09-28.json` and cleared; re-teach the points you need.
-Current taught points are snapshotted into `points_backups/<timestamp>/` (the live file,
-`~/.ros/rv2aj_points.json`, is outside the repo).
+After changing home, rebuild `rv2aj_control` and `rv2aj_moveit_config` and restart.
 
-### 5.3 Table and gripper in the model
+### Collision model
 
-The URDF contains:
-- **`table`** — a 1.4 × 1.4 m slab whose top is the base mounting plane (Z = 0).
-- **`gripper_envelope`** — collision-only box 80 × 80 mm, 120 mm out from the flange face.
+The URDF has a 1.4 × 1.4 m table slab at the base mounting plane (Z = 0) and an 80 × 80 × 120 mm
+collision box for the gripper. MoveIt refuses any pose where the arm or gripper touches the table.
+Nothing else on the station is modelled.
 
-MoveIt (`/check_state_validity`) refuses any pose where the arm or the gripper touches the table
-(verified: "wrist into the table" and "fingers into the table" are refused, the same poses 10 cm higher are allowed).
-Other station parts are **not** modelled.
+### Frozen joints
 
-### 5.4 Frozen joints (for a real hardware fault)
-
-```yaml
-frozen_joints: []          # e.g. [J5]
-```
-
-A frozen joint never moves: straight-line moves keep it and let the tool pitch change instead,
-joint targets (home, points) keep its current angle, OMPL detours are constrained, MoveIt trajectories
-that move it are refused, the driver refuses steps and overrides targets, and the GUI card shows "LOCKED · encoder fault". Currently empty.
+`frozen_joints: [J5]` locks a joint in case of a hardware fault: straight moves keep it fixed and
+let the tool pitch change instead, joint targets keep its current angle, and the driver refuses to
+move it. The list is empty in normal use.
 
 ---
 
-## 6. ROS 2 stack (rv2aj_ws)
+## 6. ROS 2 stack
 
-### 6.1 Packages
+### Packages
 
 | Package | Content |
 |---|---|
-| `rv2aj_description` | `urdf/rv2aj.urdf.xacro` (links, joints, limits from `joint_limits.yaml`, zero offsets, table, gripper envelope), meshes |
-| `rv2aj_moveit_config` | `config/rv2aj.srdf` (group `arm` base_link→tool0, home state, disabled collision pairs), `launch/moveit.launch.py` |
-| `rv2aj_interfaces` | messages, services, actions (6.4) |
-| `rv2aj_control` | nodes (6.2), libraries (6.5), config, launch, tests |
+| `rv2aj_description` | URDF/xacro with limits and offsets from `joint_limits.yaml`, table, gripper box, meshes |
+| `rv2aj_moveit_config` | SRDF (group `arm`, home state, disabled collision pairs), MoveIt launch |
+| `rv2aj_interfaces` | messages, services, actions |
+| `rv2aj_control` | nodes, libraries, config, launch, tests |
 
-Build:
-```bash
-cd ~/Desktop/RV-2AJ/rv2aj_ws && source /opt/ros/lyrical/setup.bash   # jazzy on the original laptop
-colcon build && source install/setup.bash
-```
+### Nodes
 
-### 6.2 Nodes (namespace `/rv2aj`)
+All nodes run in the `/rv2aj` namespace.
 
 | Node | Role |
 |---|---|
-| **driver** | Owns the serial port. Polls JPOSF every cycle (~0.1 s per query), STATE+PPOSF every 1 s (0.5 s while moving) and the line I/O bytes. Executes moves, gripper, outputs, servo, override. Publishes `status` and `joint_states`. Uses the simulated controller (`fake_link`) when `use_fake_hardware` is true. |
-| **planner** | MoveIt-validated motion in front of the driver: `planned/tcp_move`, `planned/joint_move`; also MoveIt's trajectory controller (`/rv2aj_arm_controller/follow_joint_trajectory`, same validation). |
-| **sequencer** | Teach points (name, joints, gripper, per-point speed, per-point outputs), loop playback, home, and auto-run (§8.1), triggered by the TCP sensor or by the conveyor PLC (`auto_trigger`, §9.1). |
-| **plc_bridge** | Conveyor PLC link (§9.1): reads/writes DB10 of the S7-1200 with python-snap7, publishes `plc/part_ready` and `plc/state`; maintenance services `plc/maintenance`, `plc/release_1..3`, `plc/line_stop`, `plc/line_reset` (§8.2). Idle when `plc_ip` is empty. |
-| **translator** | Simple English voice/text phrases → commands ("move up 20", "go to point 2", "stop"). |
-| **voice** | Legacy microphone → Google speech recognition → `voice/text` (off by default; the start script launches with `voice:=false`). |
-| **gui** | The control panel (section 8). |
-| move_group, robot_state_publisher | MoveIt (root namespace), following `/rv2aj/joint_states`. |
+| `driver` | Owns the serial port. Polls joints, state and I/O; runs moves, gripper, outputs, servo and override. Publishes `status` and `joint_states`. Uses the simulated controller when `use_fake_hardware` is set. |
+| `planner` | Checks every move with MoveIt before it reaches the driver (`planned/tcp_move`, `planned/joint_move`). Also serves MoveIt's FollowJointTrajectory controller. |
+| `sequencer` | Teach points, loop playback, home and auto-run. |
+| `plc_bridge` | Reads and writes DB10 on the S7-1200 with python-snap7. Idle while `plc_ip` is empty. |
+| `translator` | Turns simple text commands ("move up 20", "go to point 2", "stop") into moves. |
+| `voice` | Microphone input to `voice/text`; off by default. |
+| `gui` | The control panel. |
 
-### 6.3 Launch
+`move_group` and `robot_state_publisher` run in the root namespace and follow `/rv2aj/joint_states`.
 
-`ros2 launch rv2aj_control bringup.launch.py` with arguments:
+### Launch
+
+`ros2 launch rv2aj_control bringup.launch.py`:
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `use_fake_hardware` | false | simulate the controller |
 | `port` | /dev/ttyUSB0 | serial port |
-| `use_moveit` | true | route moves through the planner (MoveIt validation) |
+| `use_moveit` | true | route moves through the planner |
 | `gui` | true | control panel |
-| `voice` | true | legacy voice node (start script sets false) |
-| `points_file` | auto | real: `~/.ros/rv2aj_points.json`, sim: `~/.ros/rv2aj_sim/points.json` |
-| `plc` | true | conveyor PLC bridge (idle while `plc_ip` is empty) |
+| `voice` | true | voice node (the start script turns it off) |
+| `points_file` | auto | `~/.ros/rv2aj_points.json`, or `~/.ros/rv2aj_sim/points.json` in sim |
+| `plc` | true | PLC bridge |
 
-The simulator uses its own points (`~/.ros/rv2aj_sim/`), seeded from the real points
-on first run, so testing never writes into the real robot's files. GUI processes get the snap GTK
-variables stripped (VS Code snap terminals crash PyQt otherwise).
+The simulator keeps its own points file, copied from the real one on first run, so testing never
+touches the real points.
 
-### 6.4 Interfaces
+### Interfaces
 
-**Topics**
-- `/rv2aj/status` (`RobotStatus`): connected, servo_on, alarm, moving, active_motion, override_percent,
-  joints_deg[6], x/y/z_mm, a/b_deg, state_raw, last_error, gripper, line_inputs, line_outputs.
-- `/rv2aj/joint_states`, `/rv2aj/sequencer/status` (latched), `/rv2aj/planner/robot_commands`,
-  `/rv2aj/voice/text`, `/rv2aj/voice/command`, `/rv2aj/plc/part_ready`, `/rv2aj/plc/state` (latched JSON).
+Topics:
+- `status` (`RobotStatus`): connection, servo, alarm, motion, override, joints, tool pose, last
+  error, gripper, line I/O.
+- `joint_states`, `sequencer/status`, `voice/text`, `plc/part_ready`, `plc/state` (JSON).
 
-**Services (driver)**: `connect` (Connect: port), `disconnect`, `servo` (SetBool), `stop`, `reset_alarm`,
-`set_override` (SetOverride: percent), `run_program` (RunProgram — **RUN is untested**), `gripper/open`,
-`gripper/close`, `line/set` (LineSignal: signal ready|busy|error_code|sim_order, value).
+Driver services: `connect`, `disconnect`, `servo`, `stop`, `reset_alarm`, `set_override`,
+`run_program` (untested), `gripper/open`, `gripper/close`, `line/set`.
 
-**Services (sequencer)**: `points/save` (SavePoint), `points/delete`, `points/goto` (PointName),
-`points/clear`, `points/set_speed` (SetPointSpeed: point, percent), `points/set_io`
-(SetPointIO: point, outputs[], values[]), `loop/start`, `loop/stop`, `loop/auto`
-(SetAutoRun: enable, input_bit — arm/disarm the sensor-triggered auto-run, §8.1), `home/goto`.
-`SequencerStatus` (latched) carries, besides the point list and loop state,
-`auto_mode` / `pending_parts` / `auto_input_bit` / `auto_trigger` / `auto_pass_count` / `last_pass_ok`.
+Sequencer services: `points/save`, `points/delete`, `points/goto`, `points/clear`,
+`points/set_speed`, `points/set_io`, `loop/start`, `loop/stop`, `loop/auto`, `home/goto`.
 
-**Voice**: `voice/enable` (SetBool).
+PLC bridge services: `plc/maintenance`, `plc/release_1..3`, `plc/line_stop`, `plc/line_reset`.
 
-**Actions**: `tcp_move` / `joint_move` (driver, direct), `planned/tcp_move` / `planned/joint_move`
-(planner), `/rv2aj_arm_controller/follow_joint_trajectory` (planner, for MoveIt).
-- `TcpMove`: axis `X|Y|Z|R|V…`, distance_mm (R = along the arm's reach; V = by vector_mm, planner only).
-- `JointMove`: `relative` + `joint` + `offset_deg`, or absolute `target_deg[6]`; result success, message, final_deg.
+Actions: `tcp_move` and `joint_move` on the driver (unchecked), `planned/tcp_move` and
+`planned/joint_move` on the planner.
 
-Examples:
 ```bash
 ros2 topic echo --once /rv2aj/status
 ros2 service call /rv2aj/servo std_srvs/srv/SetBool "{data: true}"
 ros2 action send_goal /rv2aj/planned/tcp_move rv2aj_interfaces/action/TcpMove "{axis: Z, distance_mm: 10.0}"
-ros2 action send_goal /rv2aj/joint_move rv2aj_interfaces/action/JointMove "{relative: true, joint: J1, offset_deg: 5.0}"
+ros2 action send_goal /rv2aj/planned/joint_move rv2aj_interfaces/action/JointMove "{relative: true, joint: J1, offset_deg: 5.0}"
 ```
 
-### 6.5 Libraries (rv2aj_control/rv2aj_control)
+### Libraries
 
 | File | Content |
 |---|---|
-| `serial_link.py` | port handling, framing, verified command sequences, reply parsers, transfer-line helpers |
-| `fake_link.py` | wire-level controller simulator (parses the real command strings; rejects tuple forms) |
-| `driver_core.py` | driver logic: worker thread, polling, motion tracking/settling, safety shutdown |
-| `kinematics.py` | exact 5-axis FK/IK, straight lines, limits, frozen joints, zero offsets |
-| `voice_commands.py` | the translator's phrase parser |
-| `plc_link.py` | PLC handshake logic (DB10 bytes ↔ sequencer state), no ROS |
-| `widgets.py` | GUI widgets and theme |
+| `serial_link.py` | port handling, framing, command sequences, reply parsing |
+| `fake_link.py` | controller simulator working on the real command strings |
+| `driver_core.py` | driver logic: worker thread, polling, settle detection, safe shutdown |
+| `kinematics.py` | 5-axis FK/IK, straight lines, limits, offsets, frozen joints |
+| `plc_link.py` | PLC handshake logic, no ROS dependency |
+| `voice_commands.py` | text command parser |
+| `widgets.py` | panel widgets and theme |
 
-### 6.6 Configuration — `config/rv2aj.yaml`
+### Configuration
 
-- **driver**: port, auto_connect (starts only the read-only poll), default_override_percent 10 (applied on every
-  connect), max_tcp_move_mm 50, max_joint_step_deg 45, poll intervals.
-- **planner**: check_step_deg 1, line_step_mm 5, line_tolerance_mm 1, planning_time_s 5, move caps.
-- **translator**: require_keyword, default/max distance.
-- **sequencer**: points_file, **home_joints_deg**, **home_speed_percent** 40 (speed of a move to
-  Home, which has no taught speed of its own), gripper_wait_s 0.6,
-  **auto_input_bit** 1 (the TCP part sensor, IN1; §8.1), **auto_start_point** `P2E` (the point the
-  arm parks at / where the sensor reads — an auto pass starts at the *next* point and does not wrap).
-  **auto_trigger** `plc` (start passes from the conveyor PLC, §9.1) or `input`.
-- **plc_bridge**: **plc_ip** (empty = off), plc_port 102, rack 0, slot 1, db_number 10, poll_s 0.1, reconnect_s 2.
+`rv2aj_control/config/rv2aj.yaml`:
 
----
+- `driver`: port, default override (10 %), max TCP move (50 mm), max joint step (45°), poll intervals.
+- `planner`: check step (1°), line step (5 mm), line tolerance (1 mm), planning time.
+- `sequencer`: points file, `home_joints_deg`, `home_speed_percent` (40), gripper wait,
+  `auto_trigger` (`plc` or `input`), `auto_input_bit` (1), `auto_start_point` (`P2E`).
+- `plc_bridge`: `plc_ip` (empty = off), port 102, rack 0, slot 1, DB 10, poll and reconnect times.
 
-## 7. Motion: how a move is planned and executed
+### Tests
 
-1. **Request** — a GUI button, the sequencer or the translator asks the planner
-   (`planned/…`) for a move.
-2. **Planning**
-   - *Straight TCP move*: exact 5-axis IK every 5 mm along the line, keeping the tool pitch and J6 (as the
-     controller would), then the fewest waypoints that stay within 1 mm of the true line. A singularity
-     (joint jump > 30° between samples) refuses the move.
-   - *Joint move*: the direct joint-space line if MoveIt finds it collision-free, otherwise an OMPL plan,
-     shortcut to the fewest valid waypoints.
-3. **Validation** — every waypoint and the path between them (at least every 1°) goes through MoveIt
-   `/check_state_validity` (self-collision, table, gripper envelope) and the joint limits.
-4. **Execution** — the driver runs each waypoint as an absolute joint move (`EXECMOV JTMP`, a straight
-   line in joint space — exactly the validated path), polling JPOSF until it settles
-   (reached = at target and still for 0.2 s; stopped = still for 1 s away from target; timeout 120 s).
-5. **Result** — reached / stopped short (with the angles) / refused (with the reason).
+```bash
+cd rv2aj_ws/src/rv2aj_control && python3 -m pytest -q test/
+```
 
-Caps: one TCP move ≤ 50 mm at the driver , one joint step ≤ 45°.
-
-Smooth circular interpolation is not possible over serial (section 4.3): a curve would have to be sent as
-many short straight moves, with a brief stop between them.
-
-**Speed**: the driver sends the override with every move (default 10 %).
-The controller's own override reads 100 %; programs run from the pendant would use that.
-
-### 7.1 Teach-and-repeat playback: per-point speed, per-point I/O, and inter-point timing
-
-The sequencer plays the taught points in order (or, in auto-run, one pass; §8.1). Each taught point
-carries: `name`, `joints[6]`, a `gripper` state, a `speed_percent`, and an I/O action
-(`io_outputs[]` + `io_values[]`). For each transition to point *i* the sequencer:
-
-1. **Uses the speed of point *i* for the move into it** (speed per move, operator's choice 2026-10-27; it
-   replaced the earlier "slowest-of-two" rule). Slow/Fast on a point sets how fast the robot travels **to**
-   it; to leave a grab point slowly too, mark the point after it Slow. A move to Home uses
-   `home_speed_percent` (40 %).
-   The override is only re-sent when it differs from the last one sent (`EXECJOVRD <percent>`; §4.3).
-2. **Sends the point as one absolute joint move** (`EXECMOV JTMP`, the verified `JTMP = J_CURR` /
-   `JTMP.Jn = JTMP.Jn + RAD(d)` form; §4.3), polling `JPOSF` until it settles (reached = at target and
-   still for 0.2 s).
-3. **On arrival, actuates the point's gripper and outputs** — the gripper is re-commanded only if its
-   state changed (avoiding the ~0.6 s `gripper_wait_s` settle when it did not); each output bit in the
-   point's I/O action is written with the driver `line/set` `out<n>` signal (n = 0–15 or 900–907).
-
-**The inter-point timing experiment (2026-10-20/21).** The robot was observed stopping ~1.4 s at every
-point in a 47-point assembly loop. Instrumented informally (operator observation, not a timing harness —
-see the caveat below), the dwell decomposed into host-side overhead, **not** motion:
-
-| Source of dwell | Cost | Fix applied |
-|---|---|---|
-| Re-reading the four higher I/O bytes (8–15, hand 900–907) at every point | ~0.4 s (four extra 9600-baud byte reads) | Read all four **only when the arm is settled**; while moving read **one per poll, round-robin**; skip entirely if a move is queued |
-| Re-commanding the gripper + `gripper_wait_s` wait, even when unchanged | ~0.6 s | Skip the gripper command (and its wait) when the state is unchanged |
-| Re-sending the speed override when unchanged | serial round-trip | Send `EXECJOVRD` only on a change |
-
-Result: inter-point dead time fell from **~1.4 s to ~0.4 s**. The **residual ~0.4 s is the physical
-deceleration to a full stop** at each point and **cannot be removed** — the controller rejects continuous
-(`CNT`) blending over this serial link (error 5640; §4.4, §8.1 of `docu/ROBOT_CONTROL.md`). This is the
-honest ceiling: the dwell is reduced, not eliminated. The ~1.4 s / ~0.4 s figures are coarse operator
-observations, not harness-instrumented measurements with repeats.
+They need the built and sourced workspace. `test/conftest.py` gives every test a generic robot
+(wide limits, no offsets, nothing frozen) so the real calibration cannot leak into them.
 
 ---
 
-## 8. The control panel (GUI)
+## 7. How a move is executed
 
-The panel opens **fullscreen** (operator's choice, 2026-10-21); **F11** toggles between fullscreen
-and a normal window. Header: connection state, servo, alarm pills; port box; Connect/Disconnect; **STOP**.
-Below it, two tabs: **Operation** (the table below) and **Maintenance & safety** (§8.2).
+1. A panel button, the sequencer or the translator sends a request to the planner.
+2. The planner builds the path:
+   - Straight TCP move: IK every 5 mm along the line, keeping tool pitch and J6, reduced to the
+     fewest waypoints that stay within 1 mm of the line. A joint jump over 30° between samples
+     (a singularity) cancels the move.
+   - Joint move: a straight line in joint space if it is collision-free, otherwise an OMPL plan
+     shortened to the fewest valid waypoints.
+3. Every waypoint, and the path between them at least every 1°, is checked against the software
+   joint limits and by MoveIt (self-collision, table, gripper).
+4. The driver runs each waypoint as an absolute joint move and polls until the arm settles:
+   reached = at target and still for 0.2 s, stopped = still for 1 s away from target.
+5. The result is reached, stopped short, or refused with a reason.
 
-| Area | What it does |
+Limits per move: 50 mm for a TCP move, 45° for a joint step. Default speed is 10 %.
+
+Since moves cannot be blended, there are no smooth arcs: a curve has to be sent as short straight
+segments with a short stop between them.
+
+### Playback
+
+Each taught point stores its joints, gripper state, speed and a list of outputs to set.
+For every move to point *i* the sequencer:
+
+1. sets the speed to point *i*'s speed (the speed of a point is the speed of the move into it;
+   Home uses `home_speed_percent`), re-sending the override only when it changes;
+2. sends the point as one absolute joint move and waits for it to settle;
+3. on arrival, sets the gripper (only if it changed) and writes the point's outputs.
+
+Each point stops for about 0.4 s. That is the arm decelerating to a full stop, which cannot be
+avoided without blending. The extra I/O reads are done only when the arm is idle so they don't add to it.
+
+---
+
+## 8. Control panel
+
+The panel opens full screen (F11 toggles). The header shows connection, servo and alarm state, the
+port, Connect/Disconnect and STOP. There are two tabs, Operation and Maintenance & safety.
+
+### Operation tab
+
+| Area | Function |
 |---|---|
-| **Joints** | one card per joint: live angle, −/+ step buttons (step size 1/5/10/20/45°), hints ("check origin", "Not fitted" for J4, "LOCKED" for frozen joints). Steps go through the planner (limits + MoveIt). |
-| **TCP** | X/Y/Z/A/B of the tool (corrected model when calibrated), program row (Prog number, Run, Stop, STATE reply — RUN untested), distance per move (5/10/20/50 mm), Up/Down/Left/Right/Forward/Back buttons, legacy voice toggle. |
-| **Gripper** | OPEN / CLOSE, last commanded state, 160 N warning. |
-| **Robot IO · İstasyon 4** | live LEDs for every I/O group in use (survey 2026-10-16): IN0–7, IN8–15, OUT0–7, OUT8–15, hand inputs 900–907 (EL G) and hand outputs 900–907 (EL Ç; the pneumatic valves, 900/901 = gripper hand 1). Every output is clickable (driver `line/set` signal `out<n>`, n = 0–15 or 900–907; one bit written, its byte read back). Current order from IN7/IN6, Hazır/Meşgul toggles, error code 0–3, and "Genel çıkışları sıfırla" (OUT0–15 only; hand valves are left alone so cylinders don't jump). The extra bytes are polled only while the arm is idle. At the survey: IN4, IN9, IN11, IN13, IN15 on; hand outputs 901, 902, 904, 906 on (one side of each valve pair). **"📍 Tıklananı seçili noktaya kaydet"** (operator's choice, 2026-10-20): while checked, clicking an output also records it (output + value) against the selected point, same slot as the gripper — set automatically after the robot arrives there. |
-| **Motion** | Servo ON/OFF, speed override slider, joint step size, Home, Reset alarm. |
-| **Points & Loop** | Save point, **Insert after** (teach a point between two existing ones), Go to, Delete, Clear, table of points (joints, gripper, **speed %**), Start/End loop. **Slow (35%) / Fast (60%)** set the speed of the move **to** the selected point (operator's choice, 2026-10-20; speed per move since 2026-10-27, §7.1). A summary line shows the selected point's recorded IO actions with a **"Çıkışları temizle"** button to remove them all. **"▶ Oto-çalışma (TCP sensörü)"** arms/disarms the sensor-triggered auto-run (§8.1); it is shown armed/running, asks for confirmation when armed, and needs the servo on and ≥1 point. |
-| **Event log** | everything the stack does. |
+| Joints | live angle and −/+ step buttons per joint (1/5/10/20/45°), going through the planner |
+| TCP | tool pose, program row, step distance (5/10/20/50 mm), Up/Down/Left/Right/Forward/Back |
+| Gripper | Open / Close and the last commanded state |
+| Robot IO | LEDs for IN0–15, OUT0–15 and the hand I/O 900–907 (pneumatic valves). Outputs can be clicked to toggle. With "Tıklananı seçili noktaya kaydet" checked, a clicked output is also stored on the selected point. |
+| Motion | Servo ON/OFF, speed override, Home, Reset alarm |
+| Points & Loop | save, insert after, go to, delete, clear; point table with speed; Slow (35 %) / Fast (60 %) for the selected point; Start/End loop; auto-run button |
+| Event log | everything the stack reports |
 
-**Keyboard**
-- **`+`** (main or numpad): emergency stop, always — even while typing in a field.
-- **Esc**: stop.
-- **F11**: toggle fullscreen / normal window.
+Keys: `+` (also on the numpad) stops the robot even while typing in a field, Esc stops, F11 toggles full screen.
 
-### 8.1 Sensor-triggered auto-run
+### Maintenance & safety tab
 
-A part sensor is mounted on the robot's TCP and wired to input **IN1** (`auto_input_bit`). Because the
-sensor rides with the arm, a reading is only meaningful when the arm is parked where parts arrive — so
-the auto-run is deliberately gated on the arm being *at home*:
-
-- When auto-run is armed (`loop/auto`, SetAutoRun) and the arm is **idle, parked at home** (every fitted
-  joint within `AUTO_HOME_TOL_DEG` = 10° of `home_joints_deg`) **and the sensor sees a part**, the
-  sequencer runs **one full pass** through the taught points, then returns to home and waits for the next part.
-- Home coincides with the taught point **P2E** (`auto_start_point`), where the sensor reads, so a pass
-  **starts at the point after P2E** and runs to the last point — it does not restart from the top or wrap
-  into a continuous loop. If `auto_start_point` is not found it falls back to starting at the first point.
-- The trigger is the **rising edge** of *(idle ∧ at-home ∧ sensor)*. The arm leaves home during the pass,
-  so sensor readings taken mid-pass (the sensor moving through the air near the stations) are **ignored**;
-  returning home naturally re-arms it for the next part. Queued parts are therefore handled one pass at a
-  time without any explicit queue.
-- **Safety**: the servo is only ever enabled by a human (auto-run never enables it); arming requires the
-  servo on and at least one taught point; and **STOP disarms** auto-run (clears `auto_mode`). On restart
-  the auto-run starts disarmed.
-
-### 8.2 Maintenance & safety tab (2026-10-28)
-
-| Card | What it does |
+| Card | Function |
 |---|---|
-| **Emergency stop** | **STOP ALL**: robot STOP, loop + auto-run off, **servo off**, and `plc/line_stop` (every stopper up, all cars held, latched in the PLC). The gripper is left as it is so a held part is not dropped. Stays latched on the panel (Servo ON, loop and auto-run disabled, header pill "STOPPED") until **Reset stop**, which asks to confirm the area is clear and sends `plc/line_reset`. Servo ON afterwards is pressed by the operator. A software stop over USB/network: the hardware E-stop remains the safety stop. |
-| **Robot** | state line, Servo ON/OFF, **Home**, **Reset alarm**, gripper OPEN/CLOSE (same services and confirmations as the Operation tab). |
-| **Conveyor stoppers · PLC** | PLC link state; **Maintenance mode** toggle (refused while auto-run is armed or a pass runs); per station car LED, parts LED, piston state (UP · holding / DOWN · passing) and **Release** = one car through that stopper (maintenance mode only; station 1 not while the robot is busy). |
-| **Robot I/O · all signals** | read-only LEDs for every robot I/O group plus a list of the named signals (TCP part sensor, order bits, factory OUT0–3, error code, busy/ready, gripper) with their state. |
+| Emergency stop | STOP ALL: robot stop, loop and auto-run off, servo off, and a latched line stop on the PLC (all stoppers up). The gripper is left alone so a held part doesn't fall. Stays active until Reset stop, which asks to confirm the area is clear. |
+| Robot | Servo ON/OFF, Home, Reset alarm, gripper |
+| Conveyor stoppers | PLC link state, maintenance mode, and for each station the car/parts/piston state and a Release button (one car through, maintenance mode only) |
+| Robot I/O | read-only view of every I/O signal with names |
 
-The `+`/Esc keys and the header STOP stay robot-only (no conveyor latch to reset after every stop).
+STOP ALL is a software stop over USB and the network. The hardware E-stop is the real safety stop.
+The `+`, Esc and header STOP keys stop the robot only and don't touch the conveyor.
 
-If home is later moved to a different taught point, set `auto_start_point` to that point's name so the
-pass still starts at the point after it.
+### Auto-run
 
-**Identifying the sensor bit (experimental).** With a part present at the TCP the input byte read
-`00010010` (`line_inputs = 18`); with no part it read `00010000` (16). Bit 4 (IN4) is always on in this
-cell, so the differing bit is **bit 1 → IN1**, which is why `auto_input_bit = 1`. The new home was
-captured by reading the robot's live pose (`/rv2aj/status`) while the operator held the arm at the
-pick/wait position; those joint angles (§5.3) were written to `home_joints_deg` and verified to coincide
-with the taught point P2E (`−217.26 / −97.21 / 219.75 / — / −164.49 / −350.46`). `AUTO_HOME_TOL_DEG` is a
-compile-time constant (10°) in `sequencer_node.py`; `_near_home()` compares each fitted joint
-(J1,J2,J3,J5,J6 — J4 absent) against `home_joints_deg`, skipping any NaN reading.
+The sequencer can run one pass through the taught points each time a part is ready. The trigger
+is either the PLC (`auto_trigger: plc`) or the part sensor on the TCP, wired to IN1
+(`auto_trigger: input`).
+
+- The operator arms it from the panel. It needs the servo on and at least one taught point.
+- A pass starts only when the arm is idle and parked at home (every joint within 10°) and the
+  trigger goes high. It starts at the point after `auto_start_point` (P2E), runs to the last point
+  and goes back home. There is no wrap-around.
+- The sensor moves with the arm, so its readings during a pass are ignored. Returning home re-arms it.
+- STOP disarms auto-run. After a restart it starts disarmed.
 
 ---
 
-## 9. Festo MPS 500 transfer line
+## 9. Transfer line and PLC link
 
-Official I/O map (robot = "Robot with assembly", Station 4, connector XPA4):
+### Station 4 I/O
 
-| Signal | Controller I/O | Meaning |
+| Signal | Robot I/O | Meaning |
 |---|---|---|
-| order bit 0 / bit 1 | **IN6 / IN7** | 0 none, 1 assembly (montaj), 2 sort out (ayıklama), 3 take part from pallet (paletten al) |
-| error code bit 0 / 1 | **OUT4 / OUT5** | error code 0–3 to the station |
-| busy / order active | **OUT6** | we are working on an order |
-| station ready | **OUT7** | robot station ready |
-| — | OUT0–OUT3 | **not connected — never used** |
+| order bits 0/1 | IN6 / IN7 | 0 none, 1 assembly, 2 sort out, 3 take from pallet |
+| error code bits 0/1 | OUT4 / OUT5 | error code 0–3 to the station |
+| busy | OUT6 | working on an order |
+| ready | OUT7 | station ready |
+| — | OUT0–OUT3 | factory signals, never written |
 
-- **The conveyor is not controlled by the robot** (the line's own PLC runs it). An exhaustive search on
-  2026-09-25 (every output and hand output) confirmed that, before the official plan arrived.
-- The driver reads `VALM_INB(0)` / `VALM_OUTB(0)` in its poll; writes take operation rights (CNTLON), change one
-  bit at a time (only OUT4–OUT7) and read back to confirm. Outputs are only changed on explicit request.
-- GUI: the İstasyon IO card.
-  Simulation: `line/set` with `signal: sim_order` sets the simulated order bits.
+The robot does not drive the conveyor. The driver reads the I/O bytes in its poll and writes one
+bit at a time, only on request, reading it back to confirm.
 
----
+### Conveyor PLC
 
-### Conveyor PLC link (S7-1200)
+The original Festo master controller is replaced by an S7-1200 that runs three stopper stations.
+The PLC sits on a local router; the laptop reaches it over Wi-Fi.
 
-The unreached Festo master controller is replaced by an **S7-1200** that runs three stopper stations; the laptop runs the robot
-pass when the PLC says a full car is waiting. Network: PLC → TP-Link router (Ethernet) → laptop (Wi-Fi).
+Cars go round 1 → 2 → 3 → 1. Each station has a part sensor (sees all four parts on a car), a car
+sensor and a stopper piston (valve on = piston down = car passes; it goes back up 1 s after the car has left).
 
-- **Line logic** Cars run **1 → 2 → 3 → 1**; each
-  station has an NC part sensor (sees all 4 parts on a car), an inductive car sensor and a stopper piston (valve
-  ON = piston down = car passes; up 1 s after the car has gone).
-  - **St1 (robot)**: holds a car with parts and asks for a robot pass (one pass takes all 4 parts). Parts left →
-    one more pass; still not empty → release anyway and set **MissedPart** (warning on the panel). Never releases
-    while the robot is busy.
-  - **St2**: empty cars wait to be filled **by hand**; a filled car (parts seen for 3 s) leaves only when St3 asks.
-  - **St3**: full cars wait; empty cars pass; one car is released when St1 releases its car (or St1 has had no car
-    for 10 s — must exceed the St3 → St1 travel time).
-- **Link**: DB10 **"PC_Link"** v0.3 (optimized access OFF, PUT/GET permitted, clock memory MB0; 8 bytes). The PLC
-  writes bytes 0–3 and 6–7, the laptop only bytes 4–5 (snap7 writes whole bytes; the spare Bools in the source keep
-  each group in its own byte):
+- Station 1 (robot): holds a car with parts and asks for a robot pass, which picks all four parts.
+  If parts are left it asks for one more pass, then releases the car and raises MissedPart on the panel.
+  It never releases a car while the robot is busy.
+- Station 2: empty cars wait to be filled by hand. A filled car leaves only when station 3 asks for one.
+- Station 3: full cars wait, empty cars pass. One car is released whenever station 1 releases its car.
 
+The PLC and the laptop share DB10 "PC_Link" (optimized access off, PUT/GET allowed). The PLC writes
+part ready, heartbeat, pass count, station sensors and valve states; the laptop writes busy, done,
+error, armed, heartbeat and the maintenance bits. The exact byte layout is in `plc/LineControl.scl`.
+To build the blocks in TIA Portal, import the file under External source files and run Generate blocks.
 
----
+Handshake: PartReady starts a pass, Busy clears PartReady, and the laptop reports Done (or Error if
+the pass failed or was stopped). Both sides send a heartbeat with a 3 s timeout; while the link is
+down no pass is started. The line stop is latched inside the PLC and clears only on a LineReset
+from the laptop, so a lost connection or a restarted bridge can't restart the line.
+
+To use it, set `plc_ip` in `rv2aj.yaml` and `auto_trigger: plc`.
+
+Testing without the PLC:
+
+```bash
+python3 test/fake_plc.py [--stubborn]
+ros2 run rv2aj_control plc_bridge --ros-args -r __ns:=/rv2aj -p plc_ip:=127.0.0.1 -p plc_port:=11020
+```
